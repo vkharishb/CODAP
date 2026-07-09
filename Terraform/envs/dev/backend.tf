@@ -13,7 +13,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "codap-tfstate-ap-south-1"
+    bucket         = "codap-tfstate-ap-south-1-717090908227"
     key            = "dev/terraform.tfstate"
     region         = "ap-south-1"
     dynamodb_table = "codap-tf-locks"
