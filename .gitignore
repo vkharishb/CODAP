@@ -1,0 +1,19 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+crash.log
+crash.*.log
+
+# Never commit these
+*.pem
+*.key
+.env
+.env.*
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/

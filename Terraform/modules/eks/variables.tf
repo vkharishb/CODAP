@@ -1,0 +1,82 @@
+variable "cluster_name" {
+  type = string
+}
+
+variable "cluster_version" {
+  type    = string
+  default = "1.35"
+
+  validation {
+    # Guards against typos like "1.3" or "v1.30" reaching the AWS API,
+    # where they'd fail with a much less obvious error.
+    condition     = can(regex("^1\\.(2[7-9]|3[0-9])$", var.cluster_version))
+    error_message = "cluster_version must look like \"1.30\" and be a currently EKS-supported minor version."
+  }
+}
+
+variable "endpoint_public_access" {
+  description = "Whether the EKS API server endpoint is reachable from the public internet"
+  type        = bool
+  default     = true
+}
+
+variable "public_access_cidrs" {
+  description = "CIDR blocks allowed to reach the public API endpoint when endpoint_public_access is true. Never leave this as 0.0.0.0/0 outside of a throwaway demo."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+
+  validation {
+    condition     = alltrue([for c in var.public_access_cidrs : can(cidrhost(c, 0))])
+    error_message = "Each entry in public_access_cidrs must be a valid CIDR block, e.g. \"203.0.113.4/32\"."
+  }
+}
+
+variable "vpc_id" {
+  type = string
+}
+
+variable "private_subnet_ids" {
+  type = list(string)
+}
+
+variable "public_subnet_ids" {
+  type = list(string)
+}
+
+variable "node_instance_types" {
+  type    = list(string)
+  default = ["t3.medium"]
+}
+
+variable "node_desired_size" {
+  type    = number
+  default = 2
+}
+
+variable "node_min_size" {
+  type    = number
+  default = 1
+}
+
+variable "node_max_size" {
+  type    = number
+  default = 4
+
+  validation {
+    # Cross-field checks like this are the kind of thing that only bites
+    # you at apply time otherwise - catch it at plan time instead.
+    condition     = var.node_max_size >= var.node_desired_size && var.node_desired_size >= var.node_min_size
+    error_message = "Node group sizing must satisfy node_min_size <= node_desired_size <= node_max_size."
+  }
+}
+
+variable "tags" {
+  type    = map(string)
+  default = {}
+}
+
+variable "admin_principal_arn" {
+  description = "IAM role/user ARN to grant EKS cluster-admin access."
+  type        = string
+  default     = ""
+}

@@ -1,0 +1,167 @@
+locals {
+  tags = merge(var.tags, {
+    ManagedBy = "terraform"
+    Project   = "codap"
+  })
+}
+
+# --- Cluster IAM role ---
+resource "aws_iam_role" "cluster" {
+  name = "${var.cluster_name}-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "eks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_policy" {
+  role       = aws_iam_role.cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+# --- KMS key for EKS secrets envelope encryption ---
+resource "aws_kms_key" "eks" {
+  description             = "Envelope encryption key for ${var.cluster_name} EKS secrets"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  tags                    = local.tags
+}
+
+resource "aws_kms_alias" "eks" {
+  name          = "alias/${var.cluster_name}-eks-secrets"
+  target_key_id = aws_kms_key.eks.key_id
+}
+
+# --- EKS cluster ---
+resource "aws_eks_cluster" "this" {
+  name     = var.cluster_name
+  role_arn = aws_iam_role.cluster.arn
+  version  = var.cluster_version
+
+  vpc_config {
+    subnet_ids              = concat(var.private_subnet_ids, var.public_subnet_ids)
+    endpoint_private_access = true
+    endpoint_public_access  = var.endpoint_public_access
+    public_access_cidrs     = var.public_access_cidrs
+  }
+
+  access_config {
+    authentication_mode = "API_AND_CONFIG_MAP"
+     bootstrap_cluster_creator_admin_permissions = true
+  }
+
+  # Encrypt Kubernetes secrets at rest, on top of EBS/etcd volume encryption.
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks.arn
+    }
+    resources = ["secrets"]
+  }
+
+  # Ship control-plane logs to CloudWatch - feeds straight into the
+  # observability stack this project is built around.
+  enabled_cluster_log_types = ["api", "audit", "authenticator"]
+
+  tags = local.tags
+
+  depends_on = [aws_iam_role_policy_attachment.cluster_policy]
+}
+
+# --- OIDC provider, required for IRSA (IAM Roles for Service Accounts) ---
+data "tls_certificate" "eks" {
+  url = aws_eks_cluster.this.identity[0].oidc[0].issuer
+}
+
+resource "aws_iam_openid_connect_provider" "eks" {
+  url             = aws_eks_cluster.this.identity[0].oidc[0].issuer
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
+
+  tags = local.tags
+}
+
+# --- Node group IAM role ---
+resource "aws_iam_role" "node" {
+  name = "${var.cluster_name}-node-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "node_worker" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_cni" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_ecr" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+# --- Managed node group (private subnets only - no public IPs on workers) ---
+resource "aws_eks_node_group" "this" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "${var.cluster_name}-ng"
+  node_role_arn   = aws_iam_role.node.arn
+  subnet_ids      = var.private_subnet_ids
+
+  instance_types = var.node_instance_types
+
+  scaling_config {
+    desired_size = var.node_desired_size
+    min_size     = var.node_min_size
+    max_size     = var.node_max_size
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  tags = local.tags
+
+  depends_on = [
+    aws_iam_role_policy_attachment.node_worker,
+    aws_iam_role_policy_attachment.node_cni,
+    aws_iam_role_policy_attachment.node_ecr,
+  ]
+}
+
+resource "aws_eks_access_entry" "admin" {
+  count         = var.admin_principal_arn == "" ? 0 : 1
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = var.admin_principal_arn
+  type          = "STANDARD"
+
+  tags = local.tags
+}
+
+resource "aws_eks_access_policy_association" "admin" {
+  count         = var.admin_principal_arn == "" ? 0 : 1
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = aws_eks_access_entry.admin[0].principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+}
