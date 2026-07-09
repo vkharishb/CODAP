@@ -1,0 +1,101 @@
+name: CODAP CI
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+    paths:
+      - "demo-app/**"
+      - "dora-metrics-service/**"
+      - "Terraform/**"
+      - "gitops/**"
+      - "observability/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Validate Source, Docker, Terraform and Helm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Show runner details
+        run: |
+          uname -a
+          cat /etc/os-release
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: demo-app/package-lock.json
+
+      - name: Validate demo app
+        working-directory: demo-app
+        run: |
+          npm ci
+          npm test --if-present
+          PORT=8080 APP_ENV=ci APP_VERSION=${GITHUB_SHA} npm start > /tmp/codap-demo.log 2>&1 &
+          sleep 5
+          curl -fsS http://127.0.0.1:8080/health
+          curl -fsS http://127.0.0.1:8080/metrics
+          cat /tmp/codap-demo.log
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate DORA metrics service
+        working-directory: dora-metrics-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          PYTHONPATH=. CODAP_ENVIRONMENT=ci uvicorn app.main:app --host 127.0.0.1 --port 9000 > /tmp/codap-dora.log 2>&1 &
+          sleep 5
+          curl -fsS http://127.0.0.1:9000/health
+          curl -fsS http://127.0.0.1:9000/api/v1/dora/summary
+          curl -fsS http://127.0.0.1:9000/metrics
+          cat /tmp/codap-dora.log
+
+      - name: Build demo app Docker image
+        run: docker build -t codap-demo-api:ci ./demo-app
+
+      - name: Build DORA metrics Docker image
+        run: docker build -t codap-dora-metrics-service:ci ./dora-metrics-service
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+
+      - name: Terraform format check
+        run: terraform -chdir=Terraform fmt -check -recursive
+
+      - name: Terraform init without backend
+        run: terraform -chdir=Terraform/envs/dev init -backend=false
+
+      - name: Terraform validate
+        run: terraform -chdir=Terraform/envs/dev validate
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Helm lint and template DORA chart
+        run: |
+          helm lint dora-metrics-service/chart
+          helm template dora-metrics-service dora-metrics-service/chart
+
+      - name: Kubernetes manifest client dry-run
+        run: |
+          kubectl apply --dry-run=client --validate=false -f gitops/manifests/demo
+          kubectl apply --dry-run=client --validate=false -f gitops/manifests/dora-metrics
+          kubectl apply --dry-run=client --validate=false -f gitops/manifests/observability-dashboards

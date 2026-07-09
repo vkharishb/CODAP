@@ -16,8 +16,8 @@ terraform {
     bucket         = "codap-tfstate-ap-south-1"
     key            = "prod/terraform.tfstate"
     region         = "ap-south-1"
-    dynamodb_table = "codap-tf-locks"
     encrypt        = true
+    use_lockfile    = true
   }
 }
 

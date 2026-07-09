@@ -319,6 +319,13 @@ It performs:
 
 ---
 
+
+## GitHub Actions Automation
+
+CODAP includes GitHub Actions workflows for AWS role testing, CI validation, Docker image build/push to ECR, Terraform plan, and manual Terraform apply/destroy.
+
+See: [`docs/GITHUB_ACTIONS_RUN_GUIDE.md`](docs/GITHUB_ACTIONS_RUN_GUIDE.md)
+
 ## Author
 
 VK Harish Bodapati

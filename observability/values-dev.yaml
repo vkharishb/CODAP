@@ -32,6 +32,9 @@ prometheus:
             target_label: pod
 
 grafana:
+  service:
+    type: LoadBalancer
+    port: 80
   adminPassword: "admin123" # demo only; change it or use an external secret for real environments
   defaultDashboardsTimezone: browser
   persistence:

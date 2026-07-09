@@ -1,0 +1,114 @@
+name: CODAP CD - Build and Push Images
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "demo-app/**"
+      - "dora-metrics-service/**"
+      - ".github/workflows/cd.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  DEMO_ECR_REPOSITORY: codap-demo-api
+  DORA_ECR_REPOSITORY: codap-dora-metrics-service
+
+jobs:
+  build-push-update-gitops:
+    name: Build, Push to ECR and Update GitOps
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: codap-cd-${{ github.run_id }}
+
+      - name: Get AWS account ID
+        id: aws
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "account_id=${ACCOUNT_ID}" >> "$GITHUB_OUTPUT"
+          echo "ECR_REGISTRY=${ACCOUNT_ID}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com" >> "$GITHUB_ENV"
+
+      - name: Create ECR repositories if missing
+        run: |
+          aws ecr describe-repositories --repository-names "${DEMO_ECR_REPOSITORY}" >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name "${DEMO_ECR_REPOSITORY}"
+
+          aws ecr describe-repositories --repository-names "${DORA_ECR_REPOSITORY}" >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name "${DORA_ECR_REPOSITORY}"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push demo app image
+        run: |
+          DEMO_IMAGE="${ECR_REGISTRY}/${DEMO_ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker build -t "${DEMO_IMAGE}" -t "${ECR_REGISTRY}/${DEMO_ECR_REPOSITORY}:latest" ./demo-app
+          docker push "${DEMO_IMAGE}"
+          docker push "${ECR_REGISTRY}/${DEMO_ECR_REPOSITORY}:latest"
+          echo "DEMO_IMAGE=${DEMO_IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Build and push DORA metrics service image
+        run: |
+          DORA_IMAGE="${ECR_REGISTRY}/${DORA_ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker build -t "${DORA_IMAGE}" -t "${ECR_REGISTRY}/${DORA_ECR_REPOSITORY}:latest" ./dora-metrics-service
+          docker push "${DORA_IMAGE}"
+          docker push "${ECR_REGISTRY}/${DORA_ECR_REPOSITORY}:latest"
+          echo "DORA_IMAGE=${DORA_IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Update GitOps image and repository references
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os, re
+
+          demo_image = os.environ["DEMO_IMAGE"]
+          dora_image = os.environ["DORA_IMAGE"]
+          dora_repo, dora_tag = dora_image.rsplit(":", 1)
+          repo_url = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}.git"
+
+          demo_manifest = Path("gitops/manifests/demo/02-demo-api.yaml")
+          text = demo_manifest.read_text()
+          text = re.sub(r"image:\s+.*codap-demo-api:.*", f"image: {demo_image}", text)
+          demo_manifest.write_text(text)
+
+          values = Path("dora-metrics-service/chart/values.yaml")
+          text = values.read_text()
+          text = re.sub(r"repository:\s+.*codap-dora-metrics-service.*", f"repository: {dora_repo}", text)
+          text = re.sub(r'tag:\s+".*"', f'tag: "{dora_tag}"', text)
+          values.write_text(text)
+
+          for path in Path("gitops").rglob("*.yaml"):
+              text = path.read_text()
+              text = text.replace("https://github.com/<your-github-username>/CODAP.git", repo_url)
+              path.write_text(text)
+          PY
+
+      - name: Commit GitOps image updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add gitops dora-metrics-service/chart/values.yaml
+          git commit -m "chore(cd): update CODAP images ${GITHUB_SHA}" || echo "No image reference changes to commit"
+          git push
+
+      - name: Print deployment proof
+        run: |
+          echo "Demo image: ${DEMO_IMAGE}"
+          echo "DORA image: ${DORA_IMAGE}"
+          aws ecr describe-images --repository-name "${DEMO_ECR_REPOSITORY}" --image-ids imageTag="${GITHUB_SHA}"
+          aws ecr describe-images --repository-name "${DORA_ECR_REPOSITORY}" --image-ids imageTag="${GITHUB_SHA}"
