@@ -15,7 +15,7 @@ __pycache__/
 # Node
 node_modules/
 npm-debug.log
-proof/
+proofs/
 
 # OS / IDE
 .DS_Store
