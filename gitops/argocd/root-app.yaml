@@ -8,7 +8,7 @@ metadata:
 spec:
   project: codap
   source:
-    repoURL: https://github.com/<your-github-username>/CODAP.git
+    repoURL: https://github.com/vkharishb/CODAP.git
     targetRevision: main
     path: gitops/apps
   destination:

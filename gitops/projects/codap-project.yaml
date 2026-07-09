@@ -6,7 +6,7 @@ metadata:
 spec:
   description: CODAP workloads - observability stack, DORA metrics service, demo app
   sourceRepos:
-    - https://github.com/<your-github-username>/CODAP.git
+    - https://github.com/vkharishb/CODAP.git
     - https://prometheus-community.github.io/helm-charts
   destinations:
     - namespace: monitoring

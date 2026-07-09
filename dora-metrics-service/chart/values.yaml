@@ -1,8 +1,8 @@
 replicaCount: 1
 
 image:
-  repository: public.ecr.aws/example/codap-dora-metrics-service
-  tag: "latest"
+  repository: 717090908227.dkr.ecr.ap-south-1.amazonaws.com/codap-dora-metrics-service
+  tag: "a13791286fc979f98916547c6433ef647e7c2655"
   pullPolicy: IfNotPresent
 
 serviceAccount:

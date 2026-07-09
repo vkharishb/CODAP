@@ -14,7 +14,7 @@ spec:
       helm:
         valueFiles:
           - $values/observability/values-dev.yaml
-    - repoURL: https://github.com/<your-github-username>/CODAP.git
+    - repoURL: https://github.com/vkharishb/CODAP.git
       targetRevision: main
       ref: values
   destination:

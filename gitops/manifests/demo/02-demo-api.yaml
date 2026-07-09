@@ -37,7 +37,7 @@ spec:
       serviceAccountName: demo-app
       containers:
         - name: demo-api
-          image: public.ecr.aws/example/codap-demo-api:latest
+          image: 717090908227.dkr.ecr.ap-south-1.amazonaws.com/codap-demo-api:a13791286fc979f98916547c6433ef647e7c2655
           imagePullPolicy: IfNotPresent
           env:
             - name: APP_ENV
