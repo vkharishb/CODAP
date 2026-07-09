@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <app-name>
+  namespace: <namespace>
+  labels:
+    app.kubernetes.io/name: <app-name>
+    app.kubernetes.io/part-of: codap
+    codap.io/application: <app-name>
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: <app-name>
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: <app-name>
+        app.kubernetes.io/part-of: codap
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8080"
+    spec:
+      containers:
+        - name: <app-name>
+          image: <image>
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080

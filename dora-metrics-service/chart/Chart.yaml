@@ -1,0 +1,6 @@
+apiVersion: v2
+name: dora-metrics-service
+description: CODAP DORA metrics API and Prometheus exporter
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

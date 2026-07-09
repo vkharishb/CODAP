@@ -1,0 +1,47 @@
+replicaCount: 1
+
+image:
+  repository: public.ecr.aws/example/codap-dora-metrics-service
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: dora-metrics-service
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+env:
+  CODAP_ENVIRONMENT: dev
+  CODAP_LOG_LEVEL: INFO
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  codap.io/dashboard-uid: "codap-deployment-analytics"
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10

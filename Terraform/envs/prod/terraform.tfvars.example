@@ -1,0 +1,6 @@
+aws_region      = "ap-south-1"
+cluster_name    = "codap-prod"
+cluster_version = "1.35"
+azs             = ["ap-south-1a", "ap-south-1b", "ap-south-1c"]
+admin_cidr_blocks = []
+admin_principal_arn = "arn:aws:iam::<account-id>:role/<admin-role>"

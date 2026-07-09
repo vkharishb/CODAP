@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    app.kubernetes.io/part-of: codap
+    codap.io/environment: dev
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-app
+  namespace: demo
+  labels:
+    app.kubernetes.io/part-of: codap
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: demo-app-reader
+  namespace: demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "configmaps", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-app-reader-binding
+  namespace: demo
+subjects:
+  - kind: ServiceAccount
+    name: demo-app
+    namespace: demo
+roleRef:
+  kind: Role
+  name: demo-app-reader
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,15 @@
+{
+  "name": "codap-demo-api",
+  "version": "1.0.0",
+  "description": "Demo application for CODAP EKS deployment analytics",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "prom-client": "^15.1.3"
+  },
+  "devDependencies": {}
+}

@@ -14,7 +14,7 @@ terraform {
 
   backend "s3" {
     bucket         = "codap-tfstate-ap-south-1"
-    key            = "dev/terraform.tfstate"
+    key            = "prod/terraform.tfstate"
     region         = "ap-south-1"
     dynamodb_table = "codap-tf-locks"
     encrypt        = true

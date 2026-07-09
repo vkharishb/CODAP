@@ -1,0 +1,78 @@
+name: CODAP CI CD
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "demo-app/**"
+      - ".github/workflows/ci-cd.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build-and-update-gitops:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demo-app/package-lock.json
+
+      - name: Install and test demo app
+        working-directory: demo-app
+        run: |
+          npm install
+          npm test --if-present
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        run: |
+          IMAGE_URI=${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          docker build -t "$IMAGE_URI" demo-app
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+      - name: Update GitOps image tag
+        run: |
+          sed -i "s#image: .*codap-demo-api:.*#image: ${IMAGE_URI}#" gitops/manifests/demo/02-demo-api.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add gitops/manifests/demo/02-demo-api.yaml
+          git commit -m "chore(gitops): deploy demo-api ${IMAGE_TAG}" || echo "No manifest changes"
+          git push
+
+      - name: Send deployment event to CODAP
+        if: always()
+        env:
+          CODAP_DORA_ENDPOINT: ${{ vars.CODAP_DORA_ENDPOINT }}
+        run: |
+          if [ -z "$CODAP_DORA_ENDPOINT" ]; then
+            echo "CODAP_DORA_ENDPOINT variable not set, skipping event send"
+            exit 0
+          fi
+          STATUS="success"
+          if [ "${{ job.status }}" != "success" ]; then STATUS="failed"; fi
+          curl -X POST "$CODAP_DORA_ENDPOINT/api/v1/deployments" \
+            -H "Content-Type: application/json" \
+            -d "{\"application\":\"demo-api\",\"environment\":\"dev\",\"version\":\"${IMAGE_TAG}\",\"commit_sha\":\"${GITHUB_SHA}\",\"pipeline_url\":\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\",\"started_at\":\"$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"status\":\"${STATUS}\"}"

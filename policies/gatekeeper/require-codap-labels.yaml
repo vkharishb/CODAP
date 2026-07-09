@@ -1,0 +1,30 @@
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredcodaplabels
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredCodapLabels
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredcodaplabels
+        violation[{"msg": msg}] {
+          required := {"app.kubernetes.io/name", "app.kubernetes.io/part-of"}
+          provided := {label | input.review.object.metadata.labels[label]}
+          missing := required - provided
+          count(missing) > 0
+          msg := sprintf("missing required CODAP labels: %v", [missing])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredCodapLabels
+metadata:
+  name: require-codap-labels
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]

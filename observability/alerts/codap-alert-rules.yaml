@@ -1,0 +1,27 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: codap-alert-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: codap
+spec:
+  groups:
+    - name: codap.platform.rules
+      rules:
+        - alert: DemoApiHighRestartRate
+          expr: increase(kube_pod_container_status_restarts_total{namespace="demo"}[15m]) > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Demo API is restarting frequently"
+            description: "Pod {{ $labels.pod }} restarted more than 3 times in 15 minutes."
+        - alert: CodapDoraServiceDown
+          expr: up{namespace="dora-metrics"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CODAP DORA metrics service is down"
+            description: "Prometheus cannot scrape the DORA metrics service."

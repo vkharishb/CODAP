@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dora-metrics-service.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "dora-metrics-service.name" . }}
+    app.kubernetes.io/part-of: codap
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "dora-metrics-service.name" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "dora-metrics-service.name" . }}
+        app.kubernetes.io/part-of: codap
+      annotations:
+{{ toYaml .Values.podAnnotations | indent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: dora-metrics-service
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+{{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+{{- end }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          readinessProbe:
+{{ toYaml .Values.readinessProbe | indent 12 }}
+          livenessProbe:
+{{ toYaml .Values.livenessProbe | indent 12 }}
