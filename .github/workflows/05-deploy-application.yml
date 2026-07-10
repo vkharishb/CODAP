@@ -4,7 +4,9 @@ on:
   workflow_run:
     workflows: ["04 - Build Security Push"]
     types: [completed]
-    branches: ["main"]
+    branches:
+      - main
+      - devops
   workflow_dispatch:
 
 permissions:
@@ -17,7 +19,7 @@ env:
   EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
   DEMO_REPO: codap-demo-api
   DORA_REPO: codap-dora-metrics-service
-  IMAGE_TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
   deploy:
@@ -33,8 +35,8 @@ jobs:
       - name: Step 05.02 - Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
           role-session-name: codap-deploy-application
@@ -46,17 +48,26 @@ jobs:
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "::add-mask::$ACCOUNT_ID"
 
-          DEMO_IMAGE="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DEMO_REPO }}:${{ env.IMAGE_TAG }}"
+          SOURCE_SHA="${SOURCE_SHA:-$GITHUB_SHA}"
+          SHORT_SHA="${SOURCE_SHA:0:12}"
+          BUILD_RUN_ID="${{ github.event.workflow_run.id || github.run_id }}"
+          IMAGE_TAG="run-${BUILD_RUN_ID}-${SHORT_SHA}"
+
+          DEMO_IMAGE="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DEMO_REPO }}:$IMAGE_TAG"
           DORA_REPOSITORY="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DORA_REPO }}"
-          DORA_IMAGE="$DORA_REPOSITORY:${{ env.IMAGE_TAG }}"
+          DORA_IMAGE="$DORA_REPOSITORY:$IMAGE_TAG"
 
           echo "::add-mask::$DEMO_IMAGE"
           echo "::add-mask::$DORA_REPOSITORY"
           echo "::add-mask::$DORA_IMAGE"
 
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
           echo "DEMO_IMAGE=$DEMO_IMAGE" >> "$GITHUB_ENV"
           echo "DORA_REPOSITORY=$DORA_REPOSITORY" >> "$GITHUB_ENV"
           echo "DORA_IMAGE=$DORA_IMAGE" >> "$GITHUB_ENV"
+
+          echo "Using image tag: $IMAGE_TAG"
 
       - name: Step 05.04 - Configure kubeconfig
         run: |
@@ -100,7 +111,7 @@ jobs:
           helm upgrade --install dora-metrics-service dora-metrics-service/chart \
             --namespace dora-metrics \
             --set image.repository="$DORA_REPOSITORY" \
-            --set image.tag="${{ env.IMAGE_TAG }}" \
+            --set image.tag="$IMAGE_TAG" \
             --wait \
             --timeout 10m
 

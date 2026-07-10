@@ -2,9 +2,11 @@ name: 01 - CODAP CI
 
 on:
   workflow_run:
-    workflows: ["00 - aws-role-test"]
+    workflows: ["00 - AWS Role Test"]
     types: [completed]
-    branches: ["main"]
+    branches:
+      - main
+      - devops
     
   workflow_dispatch:
 
@@ -15,6 +17,7 @@ jobs:
   ci:
     name: Step 01 - Source, Docker, Terraform, Helm and Manifest Validation
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Step 01.01 - Checkout source code
@@ -26,7 +29,7 @@ jobs:
           cat /etc/os-release
 
       - name: Step 01.03 - Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
