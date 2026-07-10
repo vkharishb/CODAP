@@ -1,17 +1,11 @@
 name: 01 - CODAP CI
 
 on:
-  pull_request:
+  workflow_run:
+    workflows: ["00 - aws-role-test"]
+    types: [completed]
     branches: ["main"]
-  push:
-    branches: ["main"]
-    paths:
-      - "demo-app/**"
-      - "dora-metrics-service/**"
-      - "terraform/**"
-      - "gitops/**"
-      - "observability/**"
-      - ".github/workflows/01-ci.yml"
+    
   workflow_dispatch:
 
 permissions:
@@ -32,7 +26,7 @@ jobs:
           cat /etc/os-release
 
       - name: Step 01.03 - Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v3
         with:
           node-version: "20"
           cache: npm
