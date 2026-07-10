@@ -8,7 +8,7 @@ on:
     paths:
       - "demo-app/**"
       - "dora-metrics-service/**"
-      - "Terraform/**"
+      - "terraform/**"
       - "gitops/**"
       - "observability/**"
       - ".github/workflows/ci.yml"
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   ci:
-    name: Validate Source, Docker, Terraform and Helm
+    name: Validate Source, Docker, terraform and Helm
     runs-on: ubuntu-latest
 
     steps:
@@ -72,19 +72,19 @@ jobs:
       - name: Build DORA metrics Docker image
         run: docker build -t codap-dora-metrics-service:ci ./dora-metrics-service
 
-      - name: Setup Terraform
+      - name: Setup terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.10.5"
 
-      - name: Terraform format check
-        run: terraform -chdir=Terraform fmt -check -recursive
+      - name: terraform format check
+        run: terraform -chdir=terraform fmt -check -recursive
 
-      - name: Terraform init without backend
-        run: terraform -chdir=Terraform/envs/dev init -backend=false
+      - name: terraform init without backend
+        run: terraform -chdir=terraform/envs/dev init -backend=false
 
-      - name: Terraform validate
-        run: terraform -chdir=Terraform/envs/dev validate
+      - name: terraform validate
+        run: terraform -chdir=terraform/envs/dev validate
 
       - name: Setup Helm
         uses: azure/setup-helm@v4

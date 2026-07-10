@@ -13,11 +13,11 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "codap-tfstate-ap-south-1-717090908227"
-    key            = "dev/terraform.tfstate"
-    region         = "ap-south-1"
-    encrypt        = true
-    use_lockfile   = true
+    bucket       = "codap-tfstate-ap-south-1-717090908227"
+    key          = "dev/terraform.tfstate"
+    region       = "ap-south-1"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 
