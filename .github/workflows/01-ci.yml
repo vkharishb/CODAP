@@ -1,17 +1,13 @@
 name: 01 - CODAP CI
 
 on:
-  pull_request:
-    branches: ["main"]
-  push:
-    branches: ["main"]
-    paths:
-      - "demo-app/**"
-      - "dora-metrics-service/**"
-      - "terraform/**"
-      - "gitops/**"
-      - "observability/**"
-      - ".github/workflows/01-ci.yml"
+  workflow_run:
+    workflows: ["00 - AWS Role Test"]
+    types: [completed]
+    branches:
+      - main
+      - devops
+    
   workflow_dispatch:
 
 permissions:
@@ -21,6 +17,7 @@ jobs:
   ci:
     name: Step 01 - Source, Docker, Terraform, Helm and Manifest Validation
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Step 01.01 - Checkout source code

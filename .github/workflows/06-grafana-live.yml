@@ -4,7 +4,9 @@ on:
   workflow_run:
     workflows: ["05 - Deploy Application"]
     types: [completed]
-    branches: ["main"]
+    branches:
+      - main
+      - devops
   workflow_dispatch:
 
 permissions:
@@ -26,8 +28,8 @@ jobs:
       - name: Step 06.01 - Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
           role-session-name: codap-grafana-live

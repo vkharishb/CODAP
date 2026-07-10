@@ -4,7 +4,9 @@ on:
   workflow_run:
     workflows: ["03 - Terraform Apply"]
     types: [completed]
-    branches: ["main"]
+    branches:
+      - main
+      - devops
   workflow_dispatch:
 
 permissions:
@@ -16,24 +18,39 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   DEMO_REPO: codap-demo-api
   DORA_REPO: codap-dora-metrics-service
-  IMAGE_TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
   build-security-push:
     name: Step 04 - CI, Coverage, SonarQube, OWASP, Trivy, Build and ECR Push
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
 
     steps:
-      - name: Step 04.01 - Checkout source code
+      - name: Step 04.01 - Checkout source code from triggering commit
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
-      - name: Step 04.02 - Show Linux runner details
+      - name: Step 04.02 - Prepare source SHA and image tag
         run: |
           uname -a
           cat /etc/os-release
+
+          SOURCE_SHA="${SOURCE_SHA:-$GITHUB_SHA}"
+          SHORT_SHA="${SOURCE_SHA:0:12}"
+          IMAGE_TAG="run-${GITHUB_RUN_ID}-${SHORT_SHA}"
+
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+          echo "Source SHA: $SOURCE_SHA"
+          echo "Image tag: $IMAGE_TAG"
 
       - name: Step 04.03 - Setup Node.js for demo app
         uses: actions/setup-node@v4
@@ -59,7 +76,7 @@ jobs:
       - name: Step 04.06 - Runtime smoke test demo app
         working-directory: demo-app
         run: |
-          PORT=8080 APP_ENV=ci APP_VERSION=${IMAGE_TAG} npm start > /tmp/codap-demo.log 2>&1 &
+          PORT=8080 APP_ENV=ci APP_VERSION="$IMAGE_TAG" npm start > /tmp/codap-demo.log 2>&1 &
           sleep 5
           curl -fsS http://127.0.0.1:8080/health
           curl -fsS http://127.0.0.1:8080/metrics
@@ -98,77 +115,86 @@ jobs:
           cat /tmp/codap-dora.log
 
       - name: Step 04.11 - Prepare SonarQube project properties
+        env:
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY || 'vkharishb_CODAP' }}
         run: |
-          cat > sonar-project.properties <<'EOF'
-          sonar.projectKey=${SONAR_PROJECT_KEY}
+          SONAR_KEY="$SONAR_PROJECT_KEY"
+
+          cat > sonar-project.properties <<EOF_SONAR
+          sonar.projectKey=$SONAR_KEY
           sonar.projectName=CODAP
           sonar.sources=demo-app,dora-metrics-service,gitops,terraform,observability
-          sonar.exclusions=**/node_modules/**,**/.venv/**,**/coverage/**,**/.terraform/**
+          sonar.exclusions=**/node_modules/**,**/.venv/**,**/coverage/**,**/.terraform/**,reports/**
           sonar.javascript.lcov.reportPaths=demo-app/coverage/lcov.info
           sonar.python.coverage.reportPaths=dora-metrics-service/coverage.xml
-          EOF
+          EOF_SONAR
 
-      - name: Step 04.12 - SonarQube code quality and coverage scan
-        if: ${{ secrets.SONAR_TOKEN != '' }}
-        uses: SonarSource/sonarqube-scan-action@v7
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
-          SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
-
-      - name: Step 04.12A - Skip SonarQube when secret is missing
-        if: ${{ secrets.SONAR_TOKEN == '' }}
-        run: echo "SONAR_TOKEN is not configured. Skipping SonarQube scan."
-
-      - name: Step 04.13 - OWASP Dependency-Check vulnerability scan
-        run: |
-          mkdir -p reports/owasp
-          NVD_ARGS=""
-          if [ -n "${{ secrets.NVD_API_KEY }}" ]; then
-            NVD_ARGS="--nvdApiKey ${{ secrets.NVD_API_KEY }}"
+          if [ -n "$SONAR_ORGANIZATION" ]; then
+            echo "sonar.organization=$SONAR_ORGANIZATION" >> sonar-project.properties
           fi
 
+      - name: Step 04.12 - SonarQube code quality and coverage scan
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        uses: SonarSource/sonarqube-scan-action@v7
+        env:
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+
+      - name: Step 04.12A - Skip SonarQube when token or host URL is missing
+        if: ${{ env.SONAR_TOKEN == '' || env.SONAR_HOST_URL == '' }}
+        run: echo "SONAR_TOKEN or SONAR_HOST_URL is not configured. Skipping SonarQube scan."
+
+      - name: Step 04.13 - Prepare vulnerability report folders
+        run: |
+          mkdir -p reports/owasp reports/trivy
+
+      - name: Step 04.14 - OWASP Dependency-Check open-source vulnerability scan
+        timeout-minutes: 30
+        continue-on-error: true
+        run: |
           docker run --rm \
             -v "$PWD":/src \
             owasp/dependency-check:latest \
             --project "CODAP" \
-            --scan /src \
+            --scan /src/demo-app \
+            --scan /src/dora-metrics-service \
+            --scan /src/gitops \
+            --scan /src/terraform \
+            --scan /src/observability \
             --out /src/reports/owasp \
             --format HTML \
             --format JSON \
-            --disableAssembly \
-            $NVD_ARGS || true
+            --disableAssembly
 
-      - name: Step 04.14 - Trivy filesystem and IaC vulnerability scan
+      - name: Step 04.15 - Trivy filesystem and IaC vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           format: table
-          output: reports/trivy-fs-report.txt
+          output: reports/trivy/trivy-fs-iac-report.txt
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "0"
 
-      - name: Step 04.15 - Configure AWS credentials
+      - name: Step 04.16 - Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
           role-session-name: codap-build-security-push
           mask-aws-account-id: true
 
-      - name: Step 04.16 - Get AWS account and prepare image URIs
+      - name: Step 04.17 - Get AWS account and prepare ECR image URIs
         id: aws
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "::add-mask::$ACCOUNT_ID"
 
-          DEMO_IMAGE="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DEMO_REPO }}:${{ env.IMAGE_TAG }}"
-          DORA_IMAGE="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DORA_REPO }}:${{ env.IMAGE_TAG }}"
+          DEMO_IMAGE="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DEMO_REPO }}:$IMAGE_TAG"
+          DORA_IMAGE="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DORA_REPO }}:$IMAGE_TAG"
 
           echo "::add-mask::$DEMO_IMAGE"
           echo "::add-mask::$DORA_IMAGE"
@@ -177,7 +203,7 @@ jobs:
           echo "DEMO_IMAGE=$DEMO_IMAGE" >> "$GITHUB_ENV"
           echo "DORA_IMAGE=$DORA_IMAGE" >> "$GITHUB_ENV"
 
-      - name: Step 04.17 - Create ECR repositories if missing
+      - name: Step 04.18 - Create ECR repositories if missing
         run: |
           aws ecr describe-repositories --repository-names "${{ env.DEMO_REPO }}" >/dev/null 2>&1 || \
           aws ecr create-repository --repository-name "${{ env.DEMO_REPO }}"
@@ -185,80 +211,84 @@ jobs:
           aws ecr describe-repositories --repository-names "${{ env.DORA_REPO }}" >/dev/null 2>&1 || \
           aws ecr create-repository --repository-name "${{ env.DORA_REPO }}"
 
-      - name: Step 04.18 - Login to Amazon ECR
+      - name: Step 04.19 - Login to Amazon ECR
         run: |
           aws ecr get-login-password --region "${{ secrets.AWS_REGION }}" | \
           docker login --username AWS --password-stdin \
           "${{ steps.aws.outputs.account_id }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
 
-      - name: Step 04.19 - Build demo app Docker image
+      - name: Step 04.20 - Build demo app Docker image
         run: docker build -t "$DEMO_IMAGE" ./demo-app
 
-      - name: Step 04.20 - Build DORA metrics Docker image
+      - name: Step 04.21 - Build DORA metrics Docker image
         run: docker build -t "$DORA_IMAGE" ./dora-metrics-service
 
-      - name: Step 04.21 - Trivy demo image vulnerability scan
+      - name: Step 04.22 - Trivy demo image vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.DEMO_IMAGE }}
           format: table
-          output: reports/trivy-demo-image-report.txt
+          output: reports/trivy/trivy-demo-image-report.txt
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "0"
 
-      - name: Step 04.22 - Trivy DORA image vulnerability scan
+      - name: Step 04.23 - Trivy DORA image vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.DORA_IMAGE }}
           format: table
-          output: reports/trivy-dora-image-report.txt
+          output: reports/trivy/trivy-dora-image-report.txt
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "0"
 
-      - name: Step 04.23 - Push Docker images to ECR
+      - name: Step 04.24 - Push Docker images to ECR
         run: |
           docker push "$DEMO_IMAGE"
           docker push "$DORA_IMAGE"
 
-      - name: Step 04.24 - Write image metadata artifact
+      - name: Step 04.25 - Write image metadata artifact
         run: |
-          mkdir -p artifacts reports
+          mkdir -p artifacts
           {
-            echo "IMAGE_TAG=${{ env.IMAGE_TAG }}"
+            echo "IMAGE_TAG=$IMAGE_TAG"
+            echo "SOURCE_SHA=$SOURCE_SHA"
+            echo "GITHUB_WORKFLOW_RUN_ID=${{ github.run_id }}"
+            echo "GITHUB_WORKFLOW_RUN_ATTEMPT=${{ github.run_attempt }}"
             echo "DEMO_REPO=${{ env.DEMO_REPO }}"
             echo "DORA_REPO=${{ env.DORA_REPO }}"
             echo "AWS_REGION=${{ secrets.AWS_REGION }}"
-            echo "BUILD_SHA=${{ github.sha }}"
           } > artifacts/image-metadata.env
 
-      - name: Step 04.25 - Upload coverage and security reports
+      - name: Step 04.26 - Upload coverage and vulnerability reports
         uses: actions/upload-artifact@v4
         with:
-          name: codap-coverage-security-reports
+          name: codap-coverage-vulnerability-reports
           path: |
             demo-app/coverage/**
             dora-metrics-service/coverage.xml
             reports/**
           if-no-files-found: ignore
 
-      - name: Step 04.26 - Upload image metadata
+      - name: Step 04.27 - Upload image metadata
         uses: actions/upload-artifact@v4
         with:
           name: codap-image-metadata
           path: artifacts/image-metadata.env
 
-      - name: Step 04.27 - Build security push summary
+      - name: Step 04.28 - Build security push summary
         run: |
           {
             echo "## CODAP Build Security Push Completed"
             echo ""
-            echo "- Demo app tests/smoke test completed"
-            echo "- DORA service tests/smoke test completed"
-            echo "- SonarQube scan executed if configured"
-            echo "- OWASP Dependency-Check report generated"
-            echo "- Trivy filesystem and image scans completed"
+            echo "- Demo app tests and smoke test completed"
+            echo "- DORA service tests and smoke test completed"
+            echo "- SonarQube scan executed if SONAR_TOKEN is configured"
+            echo "- OWASP Dependency-Check open-source vulnerability report generated"
+            echo "- Trivy filesystem, IaC and Docker image scans completed"
             echo "- Docker images pushed to ECR"
-            echo "- Image tag: ${{ env.IMAGE_TAG }}"
+            echo "- Image tag: $IMAGE_TAG"
+            echo "- Source SHA: $SOURCE_SHA"
+            echo "- Build workflow run ID: ${{ github.run_id }}"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -1,16 +1,18 @@
-name: 99 - Terraform Destroy
+name: 03 - Terraform Apply
 
 on:
+  workflow_run:
+    workflows: ["02 - Terraform Plan"]
+    types: [completed]
+    branches:
+      - main
+      - devops
   workflow_dispatch:
-    inputs:
-      confirm_destroy:
-        description: "Type DESTROY to confirm deletion of CODAP AWS resources"
-        required: true
-        type: string
 
 permissions:
   id-token: write
   contents: read
+  actions: read
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -18,37 +20,37 @@ env:
   TF_STATE_KEY: dev/terraform.tfstate
 
 jobs:
-  terraform-destroy:
-    name: Step 99 - Manual Terraform Destroy
+  terraform-apply:
+    name: Step 03 - Terraform Apply
     runs-on: ubuntu-latest
     environment: dev
-    if: ${{ github.event.inputs.confirm_destroy == 'DESTROY' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
-      - name: Step 99.01 - Checkout source code
+      - name: Step 03.01 - Checkout source code
         uses: actions/checkout@v4
 
-      - name: Step 99.02 - Configure AWS credentials
+      - name: Step 03.02 - Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
-          role-session-name: codap-terraform-destroy
+          role-session-name: codap-terraform-apply
           mask-aws-account-id: true
 
-      - name: Step 99.03 - Mask AWS account ID
+      - name: Step 03.03 - Mask AWS account ID
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "::add-mask::$ACCOUNT_ID"
 
-      - name: Step 99.04 - Setup Terraform
+      - name: Step 03.04 - Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.10.5"
 
-      - name: Step 99.05 - Prepare backend bucket variable
+      - name: Step 03.05 - Prepare backend bucket variable
         run: |
           BACKEND_BUCKET="${{ secrets.TF_BACKEND_BUCKET }}"
           if [ -z "$BACKEND_BUCKET" ]; then
@@ -57,7 +59,7 @@ jobs:
           echo "::add-mask::$BACKEND_BUCKET"
           echo "TF_BACKEND_BUCKET=$BACKEND_BUCKET" >> "$GITHUB_ENV"
 
-      - name: Step 99.06 - Terraform init with S3 lockfile
+      - name: Step 03.06 - Terraform init with S3 lockfile
         run: |
           terraform -chdir=${{ env.TF_WORKING_DIR }} init -reconfigure \
             -backend-config="bucket=${TF_BACKEND_BUCKET}" \
@@ -66,14 +68,18 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
-      - name: Step 99.07 - Terraform destroy
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} destroy -auto-approve
+      - name: Step 03.07 - Terraform validate
+        run: terraform -chdir=${{ env.TF_WORKING_DIR }} validate
 
-      - name: Step 99.08 - Destroy summary
+      - name: Step 03.08 - Terraform apply
+        run: terraform -chdir=${{ env.TF_WORKING_DIR }} apply -auto-approve
+
+      - name: Step 03.09 - Terraform output summary
         run: |
+          terraform -chdir=${{ env.TF_WORKING_DIR }} output || true
           {
-            echo "## CODAP Terraform Destroy Completed"
+            echo "## Terraform Apply Completed"
             echo ""
-            echo "- AWS infrastructure deletion requested"
-            echo "- Check AWS Console for remaining LoadBalancers, EBS volumes, or orphaned resources"
+            echo "- EKS infrastructure apply completed"
+            echo "- Next workflow: 04 - Build Security Push"
           } >> "$GITHUB_STEP_SUMMARY"
