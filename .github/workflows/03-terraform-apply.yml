@@ -6,7 +6,6 @@ on:
     types: [completed]
     branches:
       - main
-      - devops
   workflow_dispatch:
 
 permissions:

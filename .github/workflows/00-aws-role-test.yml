@@ -1,7 +1,17 @@
 name: 00 - AWS Role Test
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - devops
+    paths:
+      - "demo-app/**"
+      - "dora-metrics-service/**"
+      - "terraform/**"
+      - "gitops/**"
+      - "observability/**"
+      - ".github/workflows/**"
 
 permissions:
   id-token: write
