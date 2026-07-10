@@ -52,7 +52,7 @@ jobs:
 
       - name: Step 02.05 - Prepare S3 backend bucket
         run: |
-          BACKEND_BUCKET="${{ secrets.TF_BACKEND_BUCKET }}"
+          BACKEND_BUCKET="$TF_BACKEND_BUCKET"
           if [ -z "$BACKEND_BUCKET" ]; then
             BACKEND_BUCKET="codap-tfstate-${{ secrets.AWS_REGION }}-vkharishb-codap"
           fi

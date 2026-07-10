@@ -53,9 +53,9 @@ jobs:
 
       - name: Step 03.05 - Prepare backend bucket variable
         run: |
-          BACKEND_BUCKET="${{ secrets.TF_BACKEND_BUCKET }}"
+          BACKEND_BUCKET="${TF_BACKEND_BUCKET}"
           if [ -z "$BACKEND_BUCKET" ]; then
-            BACKEND_BUCKET="codap-tfstate-${{ secrets.AWS_REGION }}-vkharishb-codap"
+            BACKEND_BUCKET="codap-tfstate-${AWS_REGION}-vkharishb-codap"
           fi
           echo "::add-mask::$BACKEND_BUCKET"
           echo "TF_BACKEND_BUCKET=$BACKEND_BUCKET" >> "$GITHUB_ENV"

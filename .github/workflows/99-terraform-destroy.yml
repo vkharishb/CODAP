@@ -48,12 +48,11 @@ jobs:
 
       - name: Step 99.05 - Prepare backend bucket variable
         run: |
-          BACKEND_BUCKET="${{ secrets.TF_BACKEND_BUCKET }}"
-          if [ -z "$BACKEND_BUCKET" ]; then
-            BACKEND_BUCKET="codap-tfstate-${{ secrets.AWS_REGION }}-vkharishb-codap"
+          if [ -z "$TF_BACKEND_BUCKET" ]; then
+            TF_BACKEND_BUCKET="codap-tfstate-${AWS_REGION}-vkharishb-codap"
           fi
-          echo "::add-mask::$BACKEND_BUCKET"
-          echo "TF_BACKEND_BUCKET=$BACKEND_BUCKET" >> "$GITHUB_ENV"
+          echo "::add-mask::$TF_BACKEND_BUCKET"
+          echo "TF_BACKEND_BUCKET=$TF_BACKEND_BUCKET" >> "$GITHUB_ENV"
 
       - name: Step 99.06 - Terraform init with S3 lockfile
         run: |
