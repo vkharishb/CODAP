@@ -1,0 +1,104 @@
+name: 06 - Grafana Live
+
+on:
+  workflow_run:
+    workflows: ["05 - Deploy Application"]
+    types: [completed]
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+
+jobs:
+  grafana-live:
+    name: Step 06 - Grafana Live Dashboard Proof
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Step 06.01 - Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: codap-grafana-live
+          mask-aws-account-id: true
+
+      - name: Step 06.02 - Configure kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "${{ secrets.AWS_REGION }}" \
+            --name "${{ secrets.EKS_CLUSTER_NAME }}"
+
+      - name: Step 06.03 - Ensure Grafana service is LoadBalancer
+        run: |
+          kubectl -n monitoring patch svc observability-grafana \
+            -p '{"spec":{"type":"LoadBalancer"}}' || true
+          kubectl -n monitoring get svc observability-grafana
+
+      - name: Step 06.04 - Wait for Grafana public endpoint
+        run: |
+          echo "Waiting for Grafana LoadBalancer endpoint..."
+
+          for i in {1..40}; do
+            GRAFANA_HOST=$(kubectl -n monitoring get svc observability-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+
+            if [ -n "$GRAFANA_HOST" ]; then
+              break
+            fi
+
+            echo "Waiting for LoadBalancer... attempt $i"
+            sleep 20
+          done
+
+          if [ -z "$GRAFANA_HOST" ]; then
+            echo "Grafana LoadBalancer endpoint not ready."
+            kubectl -n monitoring get svc observability-grafana -o wide
+            exit 1
+          fi
+
+          GRAFANA_URL="http://$GRAFANA_HOST"
+          DASHBOARD_URL="$GRAFANA_URL/d/codap-deployment-analytics"
+
+          echo "GRAFANA_URL=$GRAFANA_URL" >> "$GITHUB_ENV"
+          echo "DASHBOARD_URL=$DASHBOARD_URL" >> "$GITHUB_ENV"
+
+      - name: Step 06.05 - Create clickable Grafana proof summary
+        run: |
+          {
+            echo "## CODAP Grafana Dashboard Live Proof"
+            echo ""
+            echo "| Item | Link |"
+            echo "|---|---|"
+            echo "| Grafana URL | $GRAFANA_URL |"
+            echo "| CODAP Dashboard URL | $DASHBOARD_URL |"
+            echo ""
+            echo "Take screenshot after opening the dashboard link."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Step 06.06 - Create Grafana proof artifact
+        run: |
+          mkdir -p proofs/generated
+          {
+            echo "# CODAP Grafana Endpoint Proof"
+            echo ""
+            echo "Grafana URL: $GRAFANA_URL"
+            echo "CODAP Dashboard URL: $DASHBOARD_URL"
+            echo "GitHub Run ID: $GITHUB_RUN_ID"
+            echo "Commit SHA: $GITHUB_SHA"
+          } > proofs/generated/grafana-endpoint-proof.md
+
+      - name: Step 06.07 - Upload Grafana proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codap-grafana-endpoint-proof
+          path: proofs/generated/grafana-endpoint-proof.md

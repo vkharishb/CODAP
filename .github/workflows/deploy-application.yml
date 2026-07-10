@@ -1,0 +1,133 @@
+name: 05 - Deploy Application
+
+on:
+  workflow_run:
+    workflows: ["04 - Build Security Push"]
+    types: [completed]
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+  DEMO_REPO: codap-demo-api
+  DORA_REPO: codap-dora-metrics-service
+  IMAGE_TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  deploy:
+    name: Step 05 - Deploy CODAP to EKS
+    runs-on: ubuntu-latest
+    environment: dev
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Step 05.01 - Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Step 05.02 - Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: codap-deploy-application
+          mask-aws-account-id: true
+
+      - name: Step 05.03 - Prepare image URIs and mask account
+        id: images
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "::add-mask::$ACCOUNT_ID"
+
+          DEMO_IMAGE="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DEMO_REPO }}:${{ env.IMAGE_TAG }}"
+          DORA_REPOSITORY="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DORA_REPO }}"
+          DORA_IMAGE="$DORA_REPOSITORY:${{ env.IMAGE_TAG }}"
+
+          echo "::add-mask::$DEMO_IMAGE"
+          echo "::add-mask::$DORA_REPOSITORY"
+          echo "::add-mask::$DORA_IMAGE"
+
+          echo "DEMO_IMAGE=$DEMO_IMAGE" >> "$GITHUB_ENV"
+          echo "DORA_REPOSITORY=$DORA_REPOSITORY" >> "$GITHUB_ENV"
+          echo "DORA_IMAGE=$DORA_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Step 05.04 - Configure kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "${{ secrets.AWS_REGION }}" \
+            --name "${{ secrets.EKS_CLUSTER_NAME }}"
+
+      - name: Step 05.05 - Verify EKS access
+        run: |
+          kubectl get nodes
+          kubectl get namespaces
+
+      - name: Step 05.06 - Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Step 05.07 - Add Helm repositories
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+      - name: Step 05.08 - Create namespaces
+        run: |
+          kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace demo --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace dora-metrics --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Step 05.09 - Deploy Prometheus and Grafana observability stack
+        run: |
+          helm upgrade --install observability prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --values observability/values-dev.yaml \
+            --wait \
+            --timeout 15m
+
+      - name: Step 05.10 - Deploy Grafana dashboard manifests
+        run: |
+          kubectl apply -f gitops/manifests/observability-dashboards
+
+      - name: Step 05.11 - Deploy DORA metrics service
+        run: |
+          helm upgrade --install dora-metrics-service dora-metrics-service/chart \
+            --namespace dora-metrics \
+            --set image.repository="$DORA_REPOSITORY" \
+            --set image.tag="${{ env.IMAGE_TAG }}" \
+            --wait \
+            --timeout 10m
+
+      - name: Step 05.12 - Deploy demo application
+        run: |
+          mkdir -p /tmp/codap-demo-manifests
+          cp gitops/manifests/demo/*.yaml /tmp/codap-demo-manifests/
+
+          # Replace any existing codap-demo-api image reference with the image built in Step 04.
+          sed -i "s|image: .*codap-demo-api:.*|image: $DEMO_IMAGE|g" /tmp/codap-demo-manifests/*.yaml
+
+          kubectl apply -f /tmp/codap-demo-manifests
+
+      - name: Step 05.13 - Verify CODAP workloads
+        run: |
+          kubectl -n monitoring get pods,svc
+          kubectl -n demo get pods,svc,hpa || true
+          kubectl -n dora-metrics get pods,svc
+
+      - name: Step 05.14 - Deployment summary
+        run: |
+          {
+            echo "## CODAP Deployment Completed"
+            echo ""
+            echo "- EKS cluster: ${{ secrets.EKS_CLUSTER_NAME }}"
+            echo "- Monitoring namespace deployed"
+            echo "- Demo app namespace deployed"
+            echo "- DORA metrics namespace deployed"
+            echo "- Next workflow: 06 - Grafana Live"
+          } >> "$GITHUB_STEP_SUMMARY"

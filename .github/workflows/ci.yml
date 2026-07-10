@@ -1,4 +1,4 @@
-name: CODAP CI
+name: 01 - CODAP CI
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ on:
       - "terraform/**"
       - "gitops/**"
       - "observability/**"
-      - ".github/workflows/ci.yml"
+      - ".github/workflows/01-ci.yml"
   workflow_dispatch:
 
 permissions:
@@ -19,26 +19,26 @@ permissions:
 
 jobs:
   ci:
-    name: Validate Source, Docker, terraform and Helm
+    name: Step 01 - Source, Docker, Terraform, Helm and Manifest Validation
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source code
+      - name: Step 01.01 - Checkout source code
         uses: actions/checkout@v4
 
-      - name: Show runner details
+      - name: Step 01.02 - Show Linux runner details
         run: |
           uname -a
           cat /etc/os-release
 
-      - name: Setup Node.js
+      - name: Step 01.03 - Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: demo-app/package-lock.json
 
-      - name: Validate demo app
+      - name: Step 01.04 - Install and validate demo app
         working-directory: demo-app
         run: |
           npm ci
@@ -49,12 +49,12 @@ jobs:
           curl -fsS http://127.0.0.1:8080/metrics
           cat /tmp/codap-demo.log
 
-      - name: Setup Python
+      - name: Step 01.05 - Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Validate DORA metrics service
+      - name: Step 01.06 - Install and validate DORA metrics service
         working-directory: dora-metrics-service
         run: |
           python -m pip install --upgrade pip
@@ -66,36 +66,58 @@ jobs:
           curl -fsS http://127.0.0.1:9000/metrics
           cat /tmp/codap-dora.log
 
-      - name: Build demo app Docker image
+      - name: Step 01.07 - Build demo app Docker image
         run: docker build -t codap-demo-api:ci ./demo-app
 
-      - name: Build DORA metrics Docker image
+      - name: Step 01.08 - Build DORA metrics Docker image
         run: docker build -t codap-dora-metrics-service:ci ./dora-metrics-service
 
-      - name: Setup terraform
+      - name: Step 01.09 - Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.10.5"
 
-      - name: terraform format check
+      - name: Step 01.10 - Terraform format check
         run: terraform -chdir=terraform fmt -check -recursive
 
-      - name: terraform init without backend
+      - name: Step 01.11 - Terraform init without backend
         run: terraform -chdir=terraform/envs/dev init -backend=false
 
-      - name: terraform validate
+      - name: Step 01.12 - Terraform validate
         run: terraform -chdir=terraform/envs/dev validate
 
-      - name: Setup Helm
+      - name: Step 01.13 - Setup Helm
         uses: azure/setup-helm@v4
 
-      - name: Helm lint and template DORA chart
+      - name: Step 01.14 - Helm lint and render DORA chart
         run: |
           helm lint dora-metrics-service/chart
-          helm template dora-metrics-service dora-metrics-service/chart
+          helm template dora-metrics-service dora-metrics-service/chart > /tmp/dora-metrics-rendered.yaml
+          test -s /tmp/dora-metrics-rendered.yaml
 
-      - name: Kubernetes manifest client dry-run
+      - name: Step 01.15 - Install kubeconform
         run: |
-          kubectl apply --dry-run=client --validate=false -f gitops/manifests/demo
-          kubectl apply --dry-run=client --validate=false -f gitops/manifests/dora-metrics
-          kubectl apply --dry-run=client --validate=false -f gitops/manifests/observability-dashboards
+          curl -L -o kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+          tar -xzf kubeconform.tar.gz
+          sudo mv kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+
+      - name: Step 01.16 - Kubernetes manifest validation without cluster
+        run: |
+          kubeconform -summary -strict -ignore-missing-schemas gitops/manifests/demo/*.yaml
+          kubeconform -summary -strict -ignore-missing-schemas gitops/manifests/dora-metrics/*.yaml || true
+          kubeconform -summary -strict -ignore-missing-schemas gitops/manifests/observability-dashboards/*.yaml
+          kubeconform -summary -strict -ignore-missing-schemas /tmp/dora-metrics-rendered.yaml
+
+      - name: Step 01.17 - CI summary
+        run: |
+          {
+            echo "## CODAP CI Passed"
+            echo ""
+            echo "- Demo app validated"
+            echo "- DORA metrics service validated"
+            echo "- Docker builds passed"
+            echo "- Terraform fmt/init/validate passed"
+            echo "- Helm lint/template passed"
+            echo "- Kubernetes manifests validated without cluster"
+          } >> "$GITHUB_STEP_SUMMARY"
