@@ -13,26 +13,14 @@ terraform {
   }
 
   backend "s3" {
-    bucket       = "codap-tfstate-${var.aws_region}-${var.aws_account_id}"
-    key          = "dev/terraform.tfstate"
-    region       = var.aws_region
-    encrypt      = true
-    use_lockfile = true
+    bucket         = "codap-tfstate-ap-south-1-717090908227"
+    key            = "dev/terraform.tfstate"
+    region         = "ap-south-1"
+    encrypt        = true
+    use_lockfile   = true
   }
 }
 
 provider "aws" {
   region = var.aws_region
-}
-
-variable "aws_region" {
-  description = "AWS region to deploy resources"
-  type        = string
-  default     = "ap-south-1"
-}
-
-variable "aws_account_id" {
-  description = "AWS account ID"
-  type        = string
-  default     = "717090908227"
 }
