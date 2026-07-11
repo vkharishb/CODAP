@@ -19,6 +19,11 @@ env:
   DEMO_REPO: codap-demo-api
   DORA_REPO: codap-dora-metrics-service
   SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
+  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+
 
 jobs:
   build-security-push:
