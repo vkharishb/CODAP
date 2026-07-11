@@ -153,10 +153,21 @@ jobs:
         run: |
           mkdir -p reports/owasp reports/trivy
 
-      - name: Step 04.14 - OWASP Dependency-Check open-source vulnerability scan
-        timeout-minutes: 30
+       - name: Step 04.14 - OWASP Dependency-Check open-source vulnerability scan
+        timeout-minutes: 45
         continue-on-error: true
         run: |
+          NVD_ARGS=()
+
+          if [ -n "${NVD_API_KEY:-}" ]; then
+            echo "NVD_API_KEY is configured. OWASP scan will use authenticated NVD access."
+            NVD_ARGS+=(--nvdApiKey "$NVD_API_KEY")
+            NVD_ARGS+=(--nvdApiDelay 3500)
+          else
+            echo "NVD_API_KEY is not configured. OWASP scan will use public NVD access."
+            NVD_ARGS+=(--nvdApiDelay 8000)
+          fi
+
           docker run --rm \
             -v "$PWD":/src \
             owasp/dependency-check:latest \
@@ -169,7 +180,8 @@ jobs:
             --out /src/reports/owasp \
             --format HTML \
             --format JSON \
-            --disableAssembly
+            --disableAssembly \
+            "${NVD_ARGS[@]}"
 
       - name: Step 04.15 - Trivy filesystem and IaC vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
