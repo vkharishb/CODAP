@@ -12,7 +12,7 @@ on:
 permissions:
   id-token: write
   contents: read
-  actions: read
+  actions: write
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -143,3 +143,22 @@ jobs:
             echo "- DORA metrics namespace deployed"
             echo "- Next workflow: 06 - Grafana Live"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Step 05.15 - Trigger Grafana Live workflow
+        if: ${{ success() }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const ref =
+              context.payload.workflow_run?.head_branch ||
+              context.ref.replace('refs/heads/', '');
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '06-grafana-live.yml',
+              ref
+            });
+
+            core.info(`Triggered 06 - Grafana Live on ${ref}`);
