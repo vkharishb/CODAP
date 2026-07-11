@@ -96,6 +96,10 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 workflow_id: '04-build-security-push.yml',
-                ref
+                ref,
+                inputs: {
+                  source_run_id: String(context.runId),
+                  source_sha: context.sha
+                }
               });
               core.info(`Triggered 04 - Build Security Push on ref: ${ref}`); 
