@@ -95,6 +95,12 @@ jobs:
           kubectl create namespace demo --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace dora-metrics --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Step 05.08A - Clean failed observability release if exists
+        run: |
+          helm -n monitoring status observability || true
+          helm -n monitoring uninstall observability || true
+          kubectl -n monitoring delete pvc observability-grafana --ignore-not-found=true
+
       - name: Step 05.09 - Deploy Prometheus and Grafana observability stack
         run: |
           helm upgrade --install observability prometheus-community/kube-prometheus-stack \

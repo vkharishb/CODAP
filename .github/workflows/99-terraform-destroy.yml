@@ -3,75 +3,416 @@ name: 99 - Terraform Destroy
 on:
   workflow_dispatch:
     inputs:
-      confirm_destroy:
-        description: "Type DESTROY to confirm deletion of CODAP AWS resources"
+      destroy_action:
+        description: "Select the Terraform destroy action"
         required: true
+        type: choice
+        default: CANCEL
+        options:
+          - CANCEL
+          - DESTROY
+
+      target_environment:
+        description: "Select the environment to destroy"
+        required: true
+        type: choice
+        default: dev
+        options:
+          - dev
+          - qa
+          - stage
+          - prod
+
+      prod_username:
+        description: "For PROD only: enter your GitHub username"
+        required: false
         type: string
 
 permissions:
   id-token: write
   contents: read
 
-env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  TF_WORKING_DIR: terraform/envs/dev
-  TF_STATE_KEY: dev/terraform.tfstate
-  TF_BACKEND_BUCKET: ${{ secrets.TF_BACKEND_BUCKET }}
-
 jobs:
-  terraform-destroy:
-    name: Step 99 - Manual Terraform Destroy
+  # ============================================================
+  # Validate selected action, environment and production username
+  # ============================================================
+  validate-inputs:
+    name: Step 99A - Validate Destroy Request
     runs-on: ubuntu-latest
-    environment: dev
-    if: ${{ github.event.inputs.confirm_destroy == 'DESTROY' }}
+
+    if: ${{ inputs.destroy_action == 'DESTROY' }}
 
     steps:
-      - name: Step 99.01 - Checkout source code
+      - name: Step 99.01 - Validate destroy inputs
+        env:
+          DESTROY_ACTION: ${{ inputs.destroy_action }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+          PROD_USERNAME: ${{ inputs.prod_username }}
+          REQUESTED_BY: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+
+          echo "Destroy action: $DESTROY_ACTION"
+          echo "Target environment: $TARGET_ENVIRONMENT"
+          echo "Workflow requested by: $REQUESTED_BY"
+
+          case "$TARGET_ENVIRONMENT" in
+            dev|qa|stage|prod)
+              echo "Environment selection is valid."
+              ;;
+            *)
+              echo "::error::Unsupported environment: $TARGET_ENVIRONMENT"
+              exit 1
+              ;;
+          esac
+
+          if [[ "$TARGET_ENVIRONMENT" == "prod" ]]; then
+            if [[ -z "${PROD_USERNAME// }" ]]; then
+              echo "::error::GitHub username is mandatory for production destruction."
+              exit 1
+            fi
+
+            if [[ "${PROD_USERNAME,,}" != "${REQUESTED_BY,,}" ]]; then
+              echo "::error::Production username does not match the user who started this workflow."
+              echo "::error::Expected username: $REQUESTED_BY"
+              exit 1
+            fi
+
+            echo "Production username confirmation passed."
+          else
+            echo "Lower environment selected."
+            echo "Production username validation is not required."
+          fi
+
+      - name: Step 99.02 - Request summary
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+          REQUESTED_BY: ${{ github.triggering_actor }}
+        run: |
+          {
+            echo "## Terraform Destroy Request"
+            echo ""
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Action | DESTROY |"
+            echo "| Environment | \`$TARGET_ENVIRONMENT\` |"
+            echo "| Requested by | \`$REQUESTED_BY\` |"
+
+            if [[ "$TARGET_ENVIRONMENT" == "prod" ]]; then
+              echo "| Production username | Confirmed |"
+              echo "| Additional approval | Required |"
+            else
+              echo "| Additional approval | Not required |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================
+  # Generate the destroy plan and list affected resources
+  # ============================================================
+  destroy-plan:
+    name: Step 99B - List Resources to Destroy
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+
+    concurrency:
+      group: terraform-destroy-plan-${{ inputs.target_environment }}
+      cancel-in-progress: false
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      TF_BACKEND_BUCKET: ${{ secrets.TF_BACKEND_BUCKET }}
+      TF_WORKING_DIR: terraform/envs/${{ inputs.target_environment }}
+      TF_STATE_KEY: ${{ inputs.target_environment }}/terraform.tfstate
+
+    steps:
+      - name: Step 99.03 - Checkout source code
         uses: actions/checkout@v4
 
-      - name: Step 99.02 - Configure AWS credentials
+      - name: Step 99.04 - Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          role-session-name: codap-terraform-destroy
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: codap-${{ inputs.target_environment }}-destroy-plan
           mask-aws-account-id: true
 
-      - name: Step 99.03 - Mask AWS account ID
+      - name: Step 99.05 - Verify AWS identity
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "::add-mask::$ACCOUNT_ID"
+          set -euo pipefail
 
-      - name: Step 99.04 - Setup Terraform
+          ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "AWS account authentication successful."
+
+          {
+            echo "### AWS Target"
+            echo ""
+            echo "- AWS authentication successful"
+            echo "- Region: \`$AWS_REGION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Step 99.06 - Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.10.5"
+          terraform_wrapper: false
 
-      - name: Step 99.05 - Prepare backend bucket variable
+      - name: Step 99.07 - Prepare Terraform configuration
         run: |
-          if [ -z "$TF_BACKEND_BUCKET" ]; then
+          set -euo pipefail
+
+          if [[ -z "${AWS_REGION:-}" ]]; then
+            echo "::error::AWS_REGION secret is missing."
+            exit 1
+          fi
+
+          if [[ -z "${TF_BACKEND_BUCKET:-}" ]]; then
             TF_BACKEND_BUCKET="codap-tfstate-${AWS_REGION}-vkharishb-codap"
           fi
+
           echo "::add-mask::$TF_BACKEND_BUCKET"
           echo "TF_BACKEND_BUCKET=$TF_BACKEND_BUCKET" >> "$GITHUB_ENV"
 
-      - name: Step 99.06 - Terraform init with S3 lockfile
+          if [[ ! -d "$TF_WORKING_DIR" ]]; then
+            echo "::error::Terraform directory does not exist: $TF_WORKING_DIR"
+            exit 1
+          fi
+
+          if ! aws s3api head-bucket \
+            --bucket "$TF_BACKEND_BUCKET" 2>/dev/null; then
+            echo "::error::Terraform backend bucket is missing or inaccessible."
+            exit 1
+          fi
+
+          echo "Terraform working directory: $TF_WORKING_DIR"
+          echo "Terraform state key: $TF_STATE_KEY"
+
+      - name: Step 99.08 - Terraform init
         run: |
-          terraform -chdir=${{ env.TF_WORKING_DIR }} init -reconfigure \
-            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
-            -backend-config="key=${{ env.TF_STATE_KEY }}" \
-            -backend-config="region=${{ secrets.AWS_REGION }}" \
+          set -euo pipefail
+
+          terraform -chdir="$TF_WORKING_DIR" init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=$TF_BACKEND_BUCKET" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=$AWS_REGION" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
-      - name: Step 99.07 - Terraform destroy
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} destroy -auto-approve
+      - name: Step 99.09 - Terraform validate
+        run: |
+          terraform -chdir="$TF_WORKING_DIR" validate -no-color
 
-      - name: Step 99.08 - Destroy summary
+      - name: Step 99.10 - Create destroy plan
+        run: |
+          set -euo pipefail
+
+          terraform -chdir="$TF_WORKING_DIR" plan \
+            -destroy \
+            -input=false \
+            -lock-timeout=5m \
+            -no-color \
+            -out=destroy.tfplan
+
+      - name: Step 99.11 - Generate destruction list
+        run: |
+          set -euo pipefail
+
+          terraform -chdir="$TF_WORKING_DIR" show \
+            -json \
+            destroy.tfplan |
+            jq -r '
+              .resource_changes[]?
+              | select(.change.actions | index("delete"))
+              | .address
+            ' > "$TF_WORKING_DIR/destroy-resources.txt"
+
+          DESTROY_COUNT=$(
+            wc -l < "$TF_WORKING_DIR/destroy-resources.txt" |
+            tr -d ' '
+          )
+
+          echo "Resources planned for destruction: $DESTROY_COUNT"
+
+          {
+            echo "## Resources Planned for Destruction"
+            echo ""
+            echo "**Environment:** \`${{ inputs.target_environment }}\`"
+            echo ""
+            echo "**Total resources:** $DESTROY_COUNT"
+            echo ""
+
+            if [[ "$DESTROY_COUNT" -eq 0 ]]; then
+              echo "No Terraform-managed resources are marked for destruction."
+            else
+              echo "### Resource list"
+              echo ""
+
+              while IFS= read -r resource; do
+                echo "- \`$resource\`"
+              done < "$TF_WORKING_DIR/destroy-resources.txt"
+            fi
+
+            echo ""
+
+            if [[ "${{ inputs.target_environment }}" == "prod" ]]; then
+              echo "> Production destruction requires environment approval."
+            else
+              echo "> Lower-environment destruction will continue automatically."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Step 99.12 - Save reviewed destroy plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-destroy-plan-${{ inputs.target_environment }}
+          path: |
+            ${{ env.TF_WORKING_DIR }}/destroy.tfplan
+            ${{ env.TF_WORKING_DIR }}/destroy-resources.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  # ============================================================
+  # Apply the exact destroy plan
+  #
+  # dev/qa/stage: runs directly
+  # prod: waits for approval because the prod environment is
+  # configured with required reviewers
+  # ============================================================
+  destroy-apply:
+    name: Step 99C - Destroy ${{ inputs.target_environment }}
+    runs-on: ubuntu-latest
+    needs: destroy-plan
+
+    environment:
+      name: ${{ inputs.target_environment }}
+
+    concurrency:
+      group: terraform-destroy-apply-${{ inputs.target_environment }}
+      cancel-in-progress: false
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      TF_BACKEND_BUCKET: ${{ secrets.TF_BACKEND_BUCKET }}
+      TF_WORKING_DIR: terraform/envs/${{ inputs.target_environment }}
+      TF_STATE_KEY: ${{ inputs.target_environment }}/terraform.tfstate
+
+    steps:
+      - name: Step 99.13 - Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Step 99.14 - Download reviewed destroy plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-destroy-plan-${{ inputs.target_environment }}
+          path: ${{ env.TF_WORKING_DIR }}
+
+      - name: Step 99.15 - Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: codap-${{ inputs.target_environment }}-destroy
+          mask-aws-account-id: true
+
+      - name: Step 99.16 - Verify AWS identity
+        run: |
+          set -euo pipefail
+
+          ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "AWS account authentication successful."
+
+      - name: Step 99.17 - Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+          terraform_wrapper: false
+
+      - name: Step 99.18 - Prepare backend configuration
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TF_BACKEND_BUCKET:-}" ]]; then
+            TF_BACKEND_BUCKET="codap-tfstate-${AWS_REGION}-vkharishb-codap"
+          fi
+
+          echo "::add-mask::$TF_BACKEND_BUCKET"
+          echo "TF_BACKEND_BUCKET=$TF_BACKEND_BUCKET" >> "$GITHUB_ENV"
+
+          if [[ ! -f "$TF_WORKING_DIR/destroy.tfplan" ]]; then
+            echo "::error::The approved Terraform destroy plan was not downloaded."
+            exit 1
+          fi
+
+      - name: Step 99.19 - Terraform init
+        run: |
+          set -euo pipefail
+
+          terraform -chdir="$TF_WORKING_DIR" init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=$TF_BACKEND_BUCKET" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Step 99.20 - Display final destruction list
+        run: |
+          {
+            echo "## Final Destruction Confirmation"
+            echo ""
+            echo "**Environment:** \`${{ inputs.target_environment }}\`"
+            echo ""
+            echo "The following resources will now be destroyed:"
+            echo ""
+
+            if [[ -s "$TF_WORKING_DIR/destroy-resources.txt" ]]; then
+              while IFS= read -r resource; do
+                echo "- \`$resource\`"
+              done < "$TF_WORKING_DIR/destroy-resources.txt"
+            else
+              echo "No Terraform-managed resources are marked for destruction."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Step 99.21 - Apply approved destroy plan
+        run: |
+          set -euo pipefail
+
+          terraform -chdir="$TF_WORKING_DIR" apply \
+            -input=false \
+            -lock-timeout=5m \
+            -no-color \
+            destroy.tfplan
+
+      - name: Step 99.22 - Destroy summary
         run: |
           {
             echo "## CODAP Terraform Destroy Completed"
             echo ""
-            echo "- AWS infrastructure deletion requested"
-            echo "- Check AWS Console for remaining LoadBalancers, EBS volumes, or orphaned resources"
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Environment | \`${{ inputs.target_environment }}\` |"
+            echo "| Requested by | \`${{ github.triggering_actor }}\` |"
+            echo "| State key | \`$TF_STATE_KEY\` |"
+            echo "| Result | Completed successfully |"
+            echo ""
+            echo "### Check AWS for resources outside Terraform"
+            echo ""
+            echo "- Load balancers and target groups"
+            echo "- EBS volumes and snapshots"
+            echo "- Elastic network interfaces"
+            echo "- Elastic IP addresses"
+            echo "- CloudWatch log groups"
+            echo "- ECR images"
+            echo "- S3 buckets containing retained data"
           } >> "$GITHUB_STEP_SUMMARY"
