@@ -19,10 +19,7 @@ env:
   DEMO_REPO: codap-demo-api
   DORA_REPO: codap-dora-metrics-service
   SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-  SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
-  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+
 
 
 jobs:
@@ -34,6 +31,7 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
       SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
 
     steps:
       - name: Step 04.01 - Checkout source code from triggering commit
@@ -323,11 +321,6 @@ jobs:
               repo: context.repo.repo,
               workflow_id: '05-deploy-application.yml',
               ref,
-              inputs: {
-                build_run_id: String(context.runId),
-                source_sha: process.env.SOURCE_SHA,
-                image_tag: process.env.IMAGE_TAG
-              }
             });
 
             core.info(`Triggered 05 - Deploy Application on ${ref}`);
