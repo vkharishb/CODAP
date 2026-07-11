@@ -22,6 +22,9 @@ jobs:
     steps:
       - name: Step 01.01 - Checkout source code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
 
       - name: Step 01.02 - Show Linux runner details
         run: |

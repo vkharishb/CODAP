@@ -13,13 +13,15 @@ on:
       - "observability/**"
       - ".github/workflows/**"
 
+  workflow_dispatch:
+
 permissions:
   id-token: write
   contents: read
 
 jobs:
   aws-role-test:
-    name: Step 00 - Test AWS Credentials and Role Assume
+    name: Step 00 - Test AWS Credentials
     runs-on: ubuntu-latest
 
     steps:
@@ -35,16 +37,5 @@ jobs:
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "::add-mask::$ACCOUNT_ID"
-
           aws sts get-caller-identity
           aws configure list
-
-      - name: Step 00.03 - AWS role test summary
-        run: |
-          {
-            echo "## AWS Role Test Passed"
-            echo ""
-            echo "- GitHub Actions successfully assumed AWS IAM role"
-            echo "- AWS region: ${{ secrets.AWS_REGION }}"
-            echo "- Next workflow: 01 - CODAP CI"
-          } >> "$GITHUB_STEP_SUMMARY"

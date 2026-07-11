@@ -180,8 +180,6 @@ jobs:
       - name: Step 04.16 - Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
           role-session-name: codap-build-security-push
@@ -226,7 +224,7 @@ jobs:
       - name: Step 04.22 - Trivy demo image vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.DEMO_IMAGE }}
+          image-ref: "${{ env.DEMO_IMAGE }}"
           format: table
           output: reports/trivy/trivy-demo-image-report.txt
           severity: HIGH,CRITICAL
@@ -236,7 +234,7 @@ jobs:
       - name: Step 04.23 - Trivy DORA image vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.DORA_IMAGE }}
+          image-ref: "${{ env.DORA_IMAGE }}"
           format: table
           output: reports/trivy/trivy-dora-image-report.txt
           severity: HIGH,CRITICAL
