@@ -39,6 +39,7 @@ grafana:
   defaultDashboardsTimezone: browser
   persistence:
     enabled: true
+    storageClassName: gp3
     size: 2Gi
   sidecar:
     dashboards:

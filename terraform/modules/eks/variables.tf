@@ -74,3 +74,14 @@ variable "admin_principal_arn" {
   type        = string
   default     = ""
 }
+
+variable "install_alb_controller" {
+  description = "Whether to install the AWS Load Balancer Controller Helm chart from this module"
+  type        = bool
+  default     = false
+}
+
+variable "aws_region" {
+  type    = string
+  default = "ap-south-1"
+}
