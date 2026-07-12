@@ -167,11 +167,44 @@ jobs:
       - name: Step 05.14 - Deploy demo application
         run: |
           set -euo pipefail
-          mkdir -p /tmp/codap-demo-manifests
-          cp gitops/manifests/demo/*.yaml /tmp/codap-demo-manifests/
-          sed -i "s|image: .*codap-demo-api:.*|image: $DEMO_IMAGE|g" /tmp/codap-demo-manifests/*.yaml
-          kubectl apply -f /tmp/codap-demo-manifests
+
+          # Apply only the namespace/RBAC and the single canonical workload file.
+          # Do not use a directory wildcard here: a legacy manifest previously
+          # declared the same Deployment and Service with a different selector.
+          kubectl apply -f gitops/manifests/demo/namespace-rbac.yaml
+
+          WORK_DIR=$(mktemp -d)
+          trap 'rm -rf "$WORK_DIR"' EXIT
+          RENDERED_MANIFEST="$WORK_DIR/demo-api.yaml"
+          cp gitops/manifests/demo/demo-api.yaml "$RENDERED_MANIFEST"
+          sed -i -E \
+            "s|^([[:space:]]*)image:[[:space:]]+codap-demo-api:[^[:space:]]+|\\1image: $DEMO_IMAGE|" \
+            "$RENDERED_MANIFEST"
+
+          if ! grep -Fq "image: $DEMO_IMAGE" "$RENDERED_MANIFEST"; then
+            echo "::error::Failed to render DEMO_IMAGE into $RENDERED_MANIFEST"
+            exit 1
+          fi
+
+          # spec.selector is immutable. Normally the desired selector is already
+          # app=demo-api. This guard safely recreates only a mismatched legacy
+          # Deployment from another revision/environment.
+          DESIRED_SELECTOR='{"app":"demo-api"}'
+          if kubectl -n demo get deployment demo-api >/dev/null 2>&1; then
+            CURRENT_SELECTOR=$(kubectl -n demo get deployment demo-api -o json | \
+              jq -cS '.spec.selector.matchLabels')
+            echo "Current selector: $CURRENT_SELECTOR"
+            echo "Desired selector: $DESIRED_SELECTOR"
+
+            if [[ "$CURRENT_SELECTOR" != "$DESIRED_SELECTOR" ]]; then
+              echo "::warning::Recreating demo-api because Deployment selectors are immutable"
+              kubectl -n demo delete deployment demo-api --wait=true --timeout=3m
+            fi
+          fi
+
+          kubectl apply -f "$RENDERED_MANIFEST"
           kubectl -n demo rollout status deployment/demo-api --timeout=5m
+          kubectl -n demo get deployment,pods,service,hpa -l app=demo-api -o wide
 
       - name: Step 05.15 - Verify CODAP workloads
         run: |

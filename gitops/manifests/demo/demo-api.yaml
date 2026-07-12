@@ -12,9 +12,11 @@ metadata:
 spec:
   replicas: 2
   revisionHistoryLimit: 5
+  # Keep the immutable selector compatible with the original CODAP deployment.
+  # Standard Kubernetes recommended labels remain on the Pod template below.
   selector:
     matchLabels:
-      app.kubernetes.io/name: demo-api
+      app: demo-api
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -23,6 +25,7 @@ spec:
   template:
     metadata:
       labels:
+        app: demo-api
         app.kubernetes.io/name: demo-api
         app.kubernetes.io/part-of: codap
         app.kubernetes.io/component: workload
@@ -82,7 +85,7 @@ metadata:
     codap.io/dashboard-uid: "codap-deployment-analytics"
 spec:
   selector:
-    app.kubernetes.io/name: demo-api
+    app: demo-api
   ports:
     - name: http
       port: 80
