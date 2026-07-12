@@ -13,7 +13,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket       = "codap-tfstate-ap-south-1-717090908227"
+    bucket       = "codap-tfstate-ap-south-1-vkharishb-codap"
     key          = "dev/terraform.tfstate"
     region       = "ap-south-1"
     encrypt      = true
