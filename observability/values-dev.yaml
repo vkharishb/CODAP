@@ -35,32 +35,24 @@ grafana:
   service:
     type: LoadBalancer
     port: 80
-  adminPassword: "admin123" # demo only; change it or use an external secret for real environments
+  # Let the Grafana chart generate and store the admin password in the
+  # observability-grafana Kubernetes Secret. Do not commit a static password.
   defaultDashboardsTimezone: browser
   persistence:
     enabled: true
     storageClassName: gp3
     size: 2Gi
+  # The sidecar watches labelled ConfigMaps and loads dashboards dynamically.
+  # Do not combine this with dashboardProviders/dashboardsConfigMaps: those
+  # options mount an existing ConfigMap and can block Grafana startup when the
+  # ConfigMap is created after the Helm release.
   sidecar:
     dashboards:
       enabled: true
       label: grafana_dashboard
+      labelValue: "1"
       folder: /tmp/dashboards
-      searchNamespace: ALL
-  dashboardProviders:
-    dashboardproviders.yaml:
-      apiVersion: 1
-      providers:
-        - name: codap
-          orgId: 1
-          folder: CODAP
-          type: file
-          disableDeletion: false
-          updateIntervalSeconds: 30
-          options:
-            path: /var/lib/grafana/dashboards/codap
-  dashboardsConfigMaps:
-    codap: codap-grafana-dashboards
+      searchNamespace: monitoring
 
 alertmanager:
   alertmanagerSpec:

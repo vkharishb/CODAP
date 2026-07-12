@@ -1,13 +1,12 @@
 name: 04 - Build Security Push
 
 on:
-  workflow_run:
-    workflows: ["03 - Terraform Apply"]
-    types: [completed]
-    branches:
-      - main
-      - devops
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Source commit SHA validated and applied by the upstream workflows
+        required: false
+        type: string
 
 permissions:
   id-token: write
@@ -18,7 +17,7 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   DEMO_REPO: codap-demo-api
   DORA_REPO: codap-dora-metrics-service
-  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
 
 
 
@@ -26,7 +25,7 @@ jobs:
   build-security-push:
     name: Step 04 - CI, Coverage, SonarQube, OWASP, Trivy, Build and ECR Push
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
@@ -38,7 +37,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ inputs.source_sha || github.ref }}
 
       - name: Step 04.02 - Prepare source SHA and image tag
         run: |
@@ -321,6 +320,10 @@ jobs:
               repo: context.repo.repo,
               workflow_id: '05-deploy-application.yml',
               ref,
+              inputs: {
+                source_sha: process.env.SOURCE_SHA,
+                build_run_id: process.env.GITHUB_RUN_ID
+              }
             });
 
             core.info(`Triggered 05 - Deploy Application on ${ref}`);

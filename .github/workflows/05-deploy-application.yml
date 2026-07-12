@@ -1,13 +1,16 @@
 name: 05 - Deploy Application
 
 on:
-  workflow_run:
-    workflows: ["04 - Build Security Push"]
-    types: [completed]
-    branches:
-      - main
-      - devops
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Source commit SHA used to build the container images
+        required: false
+        type: string
+      build_run_id:
+        description: Workflow 04 run ID embedded in the ECR image tag
+        required: false
+        type: string
 
 permissions:
   id-token: write
@@ -19,20 +22,23 @@ env:
   EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
   DEMO_REPO: codap-demo-api
   DORA_REPO: codap-dora-metrics-service
-  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+  BUILD_RUN_ID: ${{ inputs.build_run_id || github.run_id }}
+  HELM_VERSION: v4.2.3
+  KUBE_PROMETHEUS_STACK_VERSION: "87.15.1"
 
 jobs:
   deploy:
     name: Step 05 - Deploy CODAP to EKS
     runs-on: ubuntu-latest
     environment: dev
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
 
     steps:
       - name: Step 05.01 - Checkout source code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ inputs.source_sha || github.ref }}
           fetch-depth: 0
 
       - name: Step 05.02 - Configure AWS credentials
@@ -46,12 +52,13 @@ jobs:
       - name: Step 05.03 - Prepare image URIs and mask account
         id: images
         run: |
+          set -euo pipefail
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "::add-mask::$ACCOUNT_ID"
 
           SOURCE_SHA="${SOURCE_SHA:-$GITHUB_SHA}"
           SHORT_SHA="${SOURCE_SHA:0:12}"
-          BUILD_RUN_ID="${{ github.event.workflow_run.id || github.run_id }}"
+          BUILD_RUN_ID="${BUILD_RUN_ID:-$GITHUB_RUN_ID}"
           IMAGE_TAG="run-${BUILD_RUN_ID}-${SHORT_SHA}"
 
           DEMO_IMAGE="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ env.DEMO_REPO }}:$IMAGE_TAG"
@@ -78,79 +85,131 @@ jobs:
 
       - name: Step 05.05 - Verify EKS access
         run: |
-          kubectl get nodes
+          set -euo pipefail
+          kubectl get nodes -o wide
           kubectl get namespaces
 
       - name: Step 05.06 - Setup Helm
         uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
 
       - name: Step 05.07 - Add Helm repositories
         run: |
+          set -euo pipefail
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo update
 
       - name: Step 05.08 - Create namespaces
         run: |
+          set -euo pipefail
           kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace demo --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace dora-metrics --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Step 05.08A - Clean failed observability release if exists
+      - name: Step 05.09 - Validate EBS CSI and gp3 storage
         run: |
-          helm -n monitoring status observability || true
-          helm -n monitoring uninstall observability || true
-          kubectl -n monitoring delete pvc observability-grafana --ignore-not-found=true
+          set -euo pipefail
+          kubectl get storageclass gp3 -o wide
+          kubectl -n kube-system rollout status deployment/ebs-csi-controller --timeout=5m
+          kubectl -n kube-system get pods -l app.kubernetes.io/name=aws-ebs-csi-driver -o wide
 
-      - name: Step 05.09 - Deploy Prometheus and Grafana observability stack
+      - name: Step 05.10 - Clean only failed or pending observability release
         run: |
-          helm upgrade --install observability prometheus-community/kube-prometheus-stack \
-            --namespace monitoring \
-            --values observability/values-dev.yaml \
-            --wait \
-            --timeout 15m
+          set -euo pipefail
+          if ! helm -n monitoring status observability >/dev/null 2>&1; then
+            echo "No existing observability release."
+            exit 0
+          fi
 
-      - name: Step 05.10 - Deploy Grafana dashboard manifests
+          RELEASE_STATUS=$(helm -n monitoring status observability -o json | jq -r '.info.status')
+          echo "Existing observability release status: $RELEASE_STATUS"
+
+          case "$RELEASE_STATUS" in
+            failed|pending-install|pending-upgrade|pending-rollback|uninstalling)
+              helm -n monitoring uninstall observability --wait --timeout 5m
+              ;;
+            *)
+              echo "Release is healthy enough for an in-place Helm upgrade."
+              ;;
+          esac
+
+      - name: Step 05.11 - Apply Grafana dashboard ConfigMap
         run: |
+          set -euo pipefail
           kubectl apply -f gitops/manifests/observability-dashboards
 
-      - name: Step 05.11 - Deploy DORA metrics service
+      - name: Step 05.12 - Deploy Prometheus and Grafana observability stack
         run: |
+          set -euo pipefail
+          helm upgrade --install observability prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --version "$KUBE_PROMETHEUS_STACK_VERSION" \
+            --values observability/values-dev.yaml \
+            --history-max 5 \
+            --wait \
+            --timeout 20m
+
+          kubectl -n monitoring rollout status deployment/observability-grafana --timeout=5m
+
+      - name: Step 05.13 - Deploy DORA metrics service
+        run: |
+          set -euo pipefail
           helm upgrade --install dora-metrics-service dora-metrics-service/chart \
             --namespace dora-metrics \
             --set image.repository="$DORA_REPOSITORY" \
             --set image.tag="$IMAGE_TAG" \
+            --history-max 5 \
             --wait \
             --timeout 10m
+          kubectl -n dora-metrics rollout status deployment/dora-metrics-service --timeout=5m
 
-      - name: Step 05.12 - Deploy demo application
+      - name: Step 05.14 - Deploy demo application
         run: |
+          set -euo pipefail
           mkdir -p /tmp/codap-demo-manifests
           cp gitops/manifests/demo/*.yaml /tmp/codap-demo-manifests/
-
-          # Replace any existing codap-demo-api image reference with the image built in Step 04.
           sed -i "s|image: .*codap-demo-api:.*|image: $DEMO_IMAGE|g" /tmp/codap-demo-manifests/*.yaml
-
           kubectl apply -f /tmp/codap-demo-manifests
+          kubectl -n demo rollout status deployment/demo-api --timeout=5m
 
-      - name: Step 05.13 - Verify CODAP workloads
+      - name: Step 05.15 - Verify CODAP workloads
         run: |
-          kubectl -n monitoring get pods,svc
-          kubectl -n demo get pods,svc,hpa || true
+          set -euo pipefail
+          kubectl -n monitoring get pods,svc,pvc
+          kubectl -n demo get pods,svc,hpa
           kubectl -n dora-metrics get pods,svc
 
-      - name: Step 05.14 - Deployment summary
+      - name: Step 05.16 - Deployment summary
         run: |
           {
             echo "## CODAP Deployment Completed"
             echo ""
+            echo "- Source SHA: $SOURCE_SHA"
+            echo "- Image tag: $IMAGE_TAG"
+            echo "- kube-prometheus-stack: $KUBE_PROMETHEUS_STACK_VERSION"
             echo "- EKS cluster: ${{ secrets.EKS_CLUSTER_NAME }}"
-            echo "- Monitoring namespace deployed"
-            echo "- Demo app namespace deployed"
-            echo "- DORA metrics namespace deployed"
+            echo "- Monitoring, demo and DORA metrics workloads are ready"
             echo "- Next workflow: 06 - Grafana Live"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Step 05.15 - Trigger Grafana Live workflow
+      - name: Step 05.17 - Collect diagnostics after a failure
+        if: ${{ failure() }}
+        run: |
+          bash scripts/collect-k8s-diagnostics.sh artifacts/deployment-diagnostics
+
+      - name: Step 05.18 - Upload deployment diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codap-deployment-diagnostics-${{ github.run_id }}
+          path: |
+            artifacts/deployment-diagnostics/**
+            artifacts/deployment-diagnostics.tar.gz
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Step 05.19 - Trigger Grafana Live workflow
         if: ${{ success() }}
         uses: actions/github-script@v7
         with:
@@ -164,7 +223,10 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: '06-grafana-live.yml',
-              ref
+              ref,
+              inputs: {
+                source_sha: process.env.SOURCE_SHA
+              }
             });
 
             core.info(`Triggered 06 - Grafana Live on ${ref}`);
