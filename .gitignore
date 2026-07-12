@@ -22,6 +22,8 @@ npm-debug.log
 .vscode/
 .idea/
 
-#others
-proofs/
+# Generated proof output
+proofs/generated/
 *.zip
+/docs
+
