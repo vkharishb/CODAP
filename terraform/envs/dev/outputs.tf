@@ -21,3 +21,7 @@ output "public_subnet_ids" {
 output "private_subnet_ids" {
   value = module.vpc.private_subnet_ids
 }
+
+output "aws_load_balancer_controller_role_arn" {
+  value = module.aws_load_balancer_controller_irsa.role_arn
+}

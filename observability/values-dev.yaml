@@ -33,7 +33,7 @@ prometheus:
 
 grafana:
   service:
-    type: LoadBalancer
+    type: ClusterIP
     port: 80
   # Let the Grafana chart generate and store the admin password in the
   # observability-grafana Kubernetes Secret. Do not commit a static password.

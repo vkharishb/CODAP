@@ -6,7 +6,6 @@ on:
     types: [completed]
     branches:
       - main
-      - devops
   workflow_dispatch:
 
 permissions:
@@ -23,7 +22,7 @@ env:
 jobs:
   terraform-apply:
     name: Step 03 - Terraform Apply
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latestclear
     environment: dev
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 

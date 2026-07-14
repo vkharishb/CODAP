@@ -24,6 +24,7 @@ jobs:
   terraform-plan:
     name: Step 02 - Terraform Plan
     runs-on: ubuntu-latest
+    environment: dev
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
@@ -55,7 +56,7 @@ jobs:
         run: |
           BACKEND_BUCKET="$TF_BACKEND_BUCKET"
           if [ -z "$BACKEND_BUCKET" ]; then
-            BACKEND_BUCKET="codap-tfstate-${{ secrets.AWS_REGION }}-vkharishb-codap"
+            BACKEND_BUCKET="codap-tfstate-${{ secrets.AWS_REGION }}"
           fi
 
           echo "::add-mask::$BACKEND_BUCKET"
