@@ -1,0 +1,26 @@
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  install:
+    commands:
+      - 'echo "CodeBuild environment: $CODEBUILD_BUILD_IMAGE"'
+      - aws --version
+
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+        CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+        echo "AWS account authentication successful."
+        echo "Caller ARN: $CALLER_ARN"
+        echo "Region: $AWS_REGION"
+        aws configure list
+
+  post_build:
+    commands:
+      - echo "AWS CodeBuild service-role test completed successfully."

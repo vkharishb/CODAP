@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DiscoverEKSCluster",
+      "Effect": "Allow",
+      "Action": [
+        "eks:DescribeCluster"
+      ],
+      "Resource": "arn:aws:eks:ap-south-2:230477418786:cluster/REPLACE_WITH_EKS_CLUSTER_NAME"
+    },
+    {
+      "Sid": "ReadLoadBalancerControllerRole",
+      "Effect": "Allow",
+      "Action": "iam:GetRole",
+      "Resource": "arn:aws:iam::230477418786:role/REPLACE_WITH_EKS_CLUSTER_NAME-aws-load-balancer-controller"
+    },
+    {
+      "Sid": "VerifyCallerIdentity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    }
+  ]
+}

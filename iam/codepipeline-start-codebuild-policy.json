@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RunCODAPCodeBuildProjects",
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:StartBuild",
+        "codebuild:BatchGetBuilds"
+      ],
+      "Resource": "arn:aws:codebuild:ap-south-2:230477418786:project/codap-*"
+    }
+  ]
+}

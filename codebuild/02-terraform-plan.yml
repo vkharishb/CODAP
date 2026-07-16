@@ -1,0 +1,108 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    APP_NAME: codap
+    TARGET_ENVIRONMENT: dev
+    TERRAFORM_VERSION: "1.10.5"
+  parameter-store:
+    TF_BACKEND_BUCKET: "/codap/dev/tf-backend-bucket"
+
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        chmod +x codebuild/scripts/install-terraform.sh
+        codebuild/scripts/install-terraform.sh "$TERRAFORM_VERSION"
+        aws --version
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        export TF_WORKING_DIR="terraform/envs/${TARGET_ENVIRONMENT}"
+        export TF_STATE_KEY="${TARGET_ENVIRONMENT}/terraform.tfstate"
+        test -d "$TF_WORKING_DIR"
+
+        if aws s3api head-bucket --bucket "$TF_BACKEND_BUCKET" 2>/dev/null; then
+          echo "Terraform backend bucket already exists."
+        else
+          if [ "$AWS_REGION" = "us-east-1" ]; then
+            aws s3api create-bucket \
+              --bucket "$TF_BACKEND_BUCKET" \
+              --region "$AWS_REGION"
+          else
+            aws s3api create-bucket \
+              --bucket "$TF_BACKEND_BUCKET" \
+              --region "$AWS_REGION" \
+              --create-bucket-configuration "LocationConstraint=$AWS_REGION"
+          fi
+        fi
+
+        aws s3api put-bucket-versioning \
+          --bucket "$TF_BACKEND_BUCKET" \
+          --versioning-configuration Status=Enabled
+
+        aws s3api put-bucket-encryption \
+          --bucket "$TF_BACKEND_BUCKET" \
+          --server-side-encryption-configuration \
+          '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+
+        aws s3api put-public-access-block \
+          --bucket "$TF_BACKEND_BUCKET" \
+          --public-access-block-configuration \
+          BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        terraform -chdir="$TF_WORKING_DIR" init \
+          -input=false \
+          -reconfigure \
+          -backend-config="bucket=$TF_BACKEND_BUCKET" \
+          -backend-config="key=$TF_STATE_KEY" \
+          -backend-config="region=$AWS_REGION" \
+          -backend-config="encrypt=true" \
+          -backend-config="use_lockfile=true"
+
+        terraform -chdir="$TF_WORKING_DIR" validate -no-color
+        terraform -chdir="$TF_WORKING_DIR" plan \
+          -input=false \
+          -lock-timeout=5m \
+          -no-color \
+          -out=tfplan
+        terraform -chdir="$TF_WORKING_DIR" show -no-color tfplan > "$TF_WORKING_DIR/tfplan.txt"
+
+  post_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        mkdir -p artifacts/terraform-plan
+        cp "$TF_WORKING_DIR/tfplan" artifacts/terraform-plan/tfplan
+        cp "$TF_WORKING_DIR/tfplan.txt" artifacts/terraform-plan/tfplan.txt
+        if [ -f "$TF_WORKING_DIR/.terraform.lock.hcl" ]; then
+          cp "$TF_WORKING_DIR/.terraform.lock.hcl" artifacts/terraform-plan/.terraform.lock.hcl
+        fi
+        cat > artifacts/terraform-plan/plan-metadata.env <<EOF_META
+        PLAN_SOURCE_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}
+        PLAN_TARGET_ENVIRONMENT=$TARGET_ENVIRONMENT
+        PLAN_TF_STATE_KEY=$TF_STATE_KEY
+        PLAN_TF_BACKEND_BUCKET=$TF_BACKEND_BUCKET
+        PLAN_AWS_REGION=$AWS_REGION
+        EOF_META
+        cat artifacts/terraform-plan/plan-metadata.env
+
+artifacts:
+  base-directory: artifacts/terraform-plan
+  files:
+    - tfplan
+    - tfplan.txt
+    - plan-metadata.env
+    - .terraform.lock.hcl

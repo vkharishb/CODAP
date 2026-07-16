@@ -1,0 +1,112 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    DESTROY_ACTION: CANCEL
+    TARGET_ENVIRONMENT: dev
+    REQUESTED_BY: unknown
+    PROD_USERNAME: ""
+    TERRAFORM_VERSION: "1.10.5"
+  parameter-store:
+    TF_BACKEND_BUCKET: "/codap/dev/tf-backend-bucket"
+
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        chmod +x codebuild/scripts/install-terraform.sh
+        codebuild/scripts/install-terraform.sh "$TERRAFORM_VERSION"
+        jq --version
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        if [ "$DESTROY_ACTION" != "DESTROY" ]; then
+          echo "DESTROY_ACTION must be DESTROY."
+          exit 1
+        fi
+
+        case "$TARGET_ENVIRONMENT" in
+          dev|qa|stage|prod) ;;
+          *)
+            echo "Unsupported environment: $TARGET_ENVIRONMENT"
+            exit 1
+            ;;
+        esac
+
+        if [ "$TARGET_ENVIRONMENT" = "prod" ] && [ -z "${PROD_USERNAME// }" ]; then
+          echo "PROD_USERNAME is mandatory for production destruction."
+          exit 1
+        fi
+
+        export TF_WORKING_DIR="terraform/envs/${TARGET_ENVIRONMENT}"
+        export TF_STATE_KEY="${TARGET_ENVIRONMENT}/terraform.tfstate"
+        test -d "$TF_WORKING_DIR"
+        aws s3api head-bucket --bucket "$TF_BACKEND_BUCKET"
+        aws sts get-caller-identity
+
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        terraform -chdir="$TF_WORKING_DIR" init \
+          -input=false \
+          -reconfigure \
+          -backend-config="bucket=$TF_BACKEND_BUCKET" \
+          -backend-config="key=$TF_STATE_KEY" \
+          -backend-config="region=$AWS_REGION" \
+          -backend-config="encrypt=true" \
+          -backend-config="use_lockfile=true"
+
+        terraform -chdir="$TF_WORKING_DIR" validate -no-color
+        terraform -chdir="$TF_WORKING_DIR" plan \
+          -destroy \
+          -input=false \
+          -lock-timeout=5m \
+          -no-color \
+          -out=destroy.tfplan
+
+        terraform -chdir="$TF_WORKING_DIR" show -json destroy.tfplan | \
+          jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | .address' \
+          > "$TF_WORKING_DIR/destroy-resources.txt"
+
+        terraform -chdir="$TF_WORKING_DIR" show -no-color destroy.tfplan \
+          > "$TF_WORKING_DIR/destroy-plan.txt"
+
+  post_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        mkdir -p artifacts/destroy-plan
+        cp "$TF_WORKING_DIR/destroy.tfplan" artifacts/destroy-plan/destroy.tfplan
+        cp "$TF_WORKING_DIR/destroy-resources.txt" artifacts/destroy-plan/destroy-resources.txt
+        cp "$TF_WORKING_DIR/destroy-plan.txt" artifacts/destroy-plan/destroy-plan.txt
+        if [ -f "$TF_WORKING_DIR/.terraform.lock.hcl" ]; then
+          cp "$TF_WORKING_DIR/.terraform.lock.hcl" artifacts/destroy-plan/.terraform.lock.hcl
+        fi
+        cat > artifacts/destroy-plan/destroy-metadata.env <<EOF_META
+        DESTROY_SOURCE_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}
+        DESTROY_TARGET_ENVIRONMENT=$TARGET_ENVIRONMENT
+        DESTROY_TF_STATE_KEY=$TF_STATE_KEY
+        DESTROY_TF_BACKEND_BUCKET=$TF_BACKEND_BUCKET
+        DESTROY_AWS_REGION=$AWS_REGION
+        DESTROY_REQUESTED_BY=$REQUESTED_BY
+        DESTROY_PROD_USERNAME=$PROD_USERNAME
+        EOF_META
+        echo "Resources planned for destruction: $(wc -l < artifacts/destroy-plan/destroy-resources.txt | tr -d ' ')"
+
+artifacts:
+  base-directory: artifacts/destroy-plan
+  files:
+    - destroy.tfplan
+    - destroy-resources.txt
+    - destroy-plan.txt
+    - destroy-metadata.env
+    - .terraform.lock.hcl

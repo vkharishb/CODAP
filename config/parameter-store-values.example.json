@@ -1,0 +1,7 @@
+{
+  "/codap/dev/tf-backend-bucket": "REPLACE_WITH_TERRAFORM_STATE_BUCKET",
+  "/codap/dev/eks-cluster-name": "REPLACE_WITH_EKS_CLUSTER_NAME",
+  "/codap/ci/sonar-host-url": "https://sonarcloud.io",
+  "/codap/ci/sonar-organization": "REPLACE_WITH_SONAR_ORGANIZATION",
+  "/codap/ci/sonar-project-key": "vkharishb_CODAP"
+}

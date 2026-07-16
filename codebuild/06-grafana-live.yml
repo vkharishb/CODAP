@@ -1,0 +1,91 @@
+version: 0.2
+
+env:
+  shell: bash
+  parameter-store:
+    EKS_CLUSTER_NAME: "/codap/dev/eks-cluster-name"
+
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        chmod +x codebuild/scripts/install-kubectl-for-eks.sh
+        codebuild/scripts/install-kubectl-for-eks.sh
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        aws eks update-kubeconfig \
+          --region "$AWS_REGION" \
+          --name "$EKS_CLUSTER_NAME"
+
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        SERVICE_TYPE="$(kubectl -n monitoring get service observability-grafana -o jsonpath='{.spec.type}')"
+        echo "Grafana Service type: $SERVICE_TYPE"
+        if [ "$SERVICE_TYPE" != "ClusterIP" ]; then
+          echo "Grafana must be ClusterIP behind the ALB Ingress."
+          exit 1
+        fi
+        kubectl -n monitoring get service observability-grafana
+        kubectl -n monitoring get ingress grafana-public
+
+      - |
+        set -euo pipefail
+        echo "Waiting for Grafana ALB Ingress endpoint..."
+        GRAFANA_HOST=""
+        for i in $(seq 1 40); do
+          GRAFANA_HOST="$(kubectl -n monitoring get ingress grafana-public \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+            2>/dev/null || true)"
+          if [ -n "$GRAFANA_HOST" ]; then
+            break
+          fi
+          echo "Waiting for LoadBalancer... attempt $i of 40"
+          kubectl -n monitoring get ingress grafana-public -o wide || true
+          sleep 20
+        done
+
+        if [ -z "$GRAFANA_HOST" ]; then
+          echo "Grafana ALB endpoint was not created."
+          kubectl -n monitoring describe ingress grafana-public || true
+          kubectl -n monitoring get service observability-grafana -o wide || true
+          kubectl -n monitoring get endpointslice \
+            -l kubernetes.io/service-name=observability-grafana \
+            -o wide || true
+          exit 1
+        fi
+
+        GRAFANA_URL="http://$GRAFANA_HOST"
+        DASHBOARD_URL="$GRAFANA_URL/d/codap-deployment-analytics"
+        export GRAFANA_HOST GRAFANA_URL DASHBOARD_URL
+        echo "Grafana URL: $GRAFANA_URL"
+        echo "Dashboard URL: $DASHBOARD_URL"
+
+  post_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        mkdir -p proofs/generated
+        cat > proofs/generated/grafana-endpoint-proof.md <<EOF_PROOF
+        # CODAP Grafana Endpoint Proof
+
+        Grafana URL: $GRAFANA_URL
+        CODAP Dashboard URL: $DASHBOARD_URL
+        CodeBuild build ID: $CODEBUILD_BUILD_ID
+        Commit SHA: ${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}
+        EOF_PROOF
+        cat proofs/generated/grafana-endpoint-proof.md
+
+artifacts:
+  base-directory: proofs/generated
+  files:
+    - grafana-endpoint-proof.md

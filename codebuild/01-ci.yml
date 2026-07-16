@@ -1,0 +1,85 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    TERRAFORM_VERSION: "1.10.5"
+    HELM_VERSION: "v4.2.2"
+    KUBECONFORM_VERSION: "v0.6.7"
+
+phases:
+  install:
+    on-failure: ABORT
+    runtime-versions:
+      nodejs: 20
+      python: 3.11
+    commands:
+      - |
+        set -euo pipefail
+        uname -a
+        cat /etc/os-release
+        chmod +x codebuild/scripts/*.sh
+        codebuild/scripts/install-terraform.sh "$TERRAFORM_VERSION"
+        codebuild/scripts/install-helm.sh "$HELM_VERSION"
+        codebuild/scripts/install-kubeconform.sh "$KUBECONFORM_VERSION"
+        docker --version
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        cd demo-app
+        npm ci
+        npm test --if-present
+        PORT=8080 APP_ENV=ci APP_VERSION="${CODEBUILD_RESOLVED_SOURCE_VERSION:-local}" \
+          npm start > /tmp/codap-demo.log 2>&1 &
+        DEMO_PID=$!
+        sleep 5
+        curl -fsS http://127.0.0.1:8080/health
+        curl -fsS http://127.0.0.1:8080/metrics
+        cat /tmp/codap-demo.log
+        kill "$DEMO_PID" 2>/dev/null || true
+        cd "$CODEBUILD_SRC_DIR"
+      - |
+        set -euo pipefail
+        cd dora-metrics-service
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        PYTHONPATH=. CODAP_ENVIRONMENT=ci \
+          uvicorn app.main:app --host 127.0.0.1 --port 9000 > /tmp/codap-dora.log 2>&1 &
+        DORA_PID=$!
+        sleep 5
+        curl -fsS http://127.0.0.1:9000/health
+        curl -fsS http://127.0.0.1:9000/api/v1/dora/summary
+        curl -fsS http://127.0.0.1:9000/metrics
+        cat /tmp/codap-dora.log
+        kill "$DORA_PID" 2>/dev/null || true
+        cd "$CODEBUILD_SRC_DIR"
+
+  build:
+    on-failure: ABORT
+    commands:
+      - docker build -t codap-demo-app:ci ./demo-app
+      - docker build -t codap-dora-metrics-service:ci ./dora-metrics-service
+      - terraform -chdir=terraform fmt -check -recursive
+      - terraform -chdir=terraform/envs/dev init -backend=false -input=false
+      - terraform -chdir=terraform/envs/dev validate
+      - helm lint dora-metrics-service/chart
+      - helm template dora-metrics-service dora-metrics-service/chart > /tmp/dora-metrics-rendered.yaml
+      - test -s /tmp/dora-metrics-rendered.yaml
+      - kubeconform -summary -strict -ignore-missing-schemas gitops/manifests/demo/*.yaml
+      - kubeconform -summary -strict -ignore-missing-schemas gitops/manifests/dora-metrics/*.yaml
+      - kubeconform -summary -strict -ignore-missing-schemas gitops/manifests/observability-dashboards/*.yaml
+      - kubeconform -summary -strict -ignore-missing-schemas /tmp/dora-metrics-rendered.yaml
+
+  post_build:
+    commands:
+      - |
+        echo "CODAP CI completed successfully."
+        echo "Source revision: ${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}"
+
+cache:
+  paths:
+    - '/root/.npm/**/*'
+    - '/root/.cache/pip/**/*'

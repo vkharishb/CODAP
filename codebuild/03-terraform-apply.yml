@@ -1,0 +1,89 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    TARGET_ENVIRONMENT: dev
+    TERRAFORM_VERSION: "1.10.5"
+  parameter-store:
+    TF_BACKEND_BUCKET: "/codap/dev/tf-backend-bucket"
+
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        chmod +x codebuild/scripts/install-terraform.sh
+        codebuild/scripts/install-terraform.sh "$TERRAFORM_VERSION"
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        : "${CODEBUILD_SRC_DIR_TerraformPlanArtifact:?TerraformPlanArtifact must be configured as a secondary input artifact}"
+        EXPECTED_ENVIRONMENT="$TARGET_ENVIRONMENT"
+        test -f "$CODEBUILD_SRC_DIR_TerraformPlanArtifact/tfplan"
+        test -f "$CODEBUILD_SRC_DIR_TerraformPlanArtifact/plan-metadata.env"
+
+        # shellcheck disable=SC1090
+        source "$CODEBUILD_SRC_DIR_TerraformPlanArtifact/plan-metadata.env"
+        if [ "$PLAN_TARGET_ENVIRONMENT" != "$EXPECTED_ENVIRONMENT" ]; then
+          echo "Terraform plan environment mismatch: plan=$PLAN_TARGET_ENVIRONMENT requested=$EXPECTED_ENVIRONMENT"
+          exit 1
+        fi
+        if [ "$PLAN_TF_BACKEND_BUCKET" != "$TF_BACKEND_BUCKET" ] || [ "$PLAN_AWS_REGION" != "$AWS_REGION" ]; then
+          echo "Terraform plan backend or region does not match the apply project."
+          exit 1
+        fi
+        if [ "$PLAN_SOURCE_SHA" != "${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}" ]; then
+          echo "Terraform plan source revision does not match the apply source revision."
+          exit 1
+        fi
+
+        export TARGET_ENVIRONMENT="$EXPECTED_ENVIRONMENT"
+        export TF_WORKING_DIR="terraform/envs/${TARGET_ENVIRONMENT}"
+        export TF_STATE_KEY="${TARGET_ENVIRONMENT}/terraform.tfstate"
+        test -d "$TF_WORKING_DIR"
+        cp "$CODEBUILD_SRC_DIR_TerraformPlanArtifact/tfplan" "$TF_WORKING_DIR/tfplan"
+        if [ -f "$CODEBUILD_SRC_DIR_TerraformPlanArtifact/.terraform.lock.hcl" ]; then
+          cp "$CODEBUILD_SRC_DIR_TerraformPlanArtifact/.terraform.lock.hcl" "$TF_WORKING_DIR/.terraform.lock.hcl"
+        fi
+
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        terraform -chdir="$TF_WORKING_DIR" init \
+          -input=false \
+          -reconfigure \
+          -backend-config="bucket=$TF_BACKEND_BUCKET" \
+          -backend-config="key=$TF_STATE_KEY" \
+          -backend-config="region=$AWS_REGION" \
+          -backend-config="encrypt=true" \
+          -backend-config="use_lockfile=true"
+        terraform -chdir="$TF_WORKING_DIR" validate -no-color
+        terraform -chdir="$TF_WORKING_DIR" apply \
+          -input=false \
+          -lock-timeout=5m \
+          -no-color \
+          tfplan
+
+  post_build:
+    commands:
+      - |
+        mkdir -p artifacts/terraform-apply
+        terraform -chdir="$TF_WORKING_DIR" output -json > artifacts/terraform-apply/terraform-output.json || true
+        cat > artifacts/terraform-apply/apply-summary.txt <<EOF_SUMMARY
+        Terraform apply completed.
+        Environment: $TARGET_ENVIRONMENT
+        State key: $TF_STATE_KEY
+        Source revision: ${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}
+        EOF_SUMMARY
+
+artifacts:
+  base-directory: artifacts/terraform-apply
+  files:
+    - '**/*'

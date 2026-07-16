@@ -1,0 +1,95 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    TARGET_ENVIRONMENT: dev
+    TERRAFORM_VERSION: "1.10.5"
+  parameter-store:
+    TF_BACKEND_BUCKET: "/codap/dev/tf-backend-bucket"
+
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        chmod +x codebuild/scripts/install-terraform.sh
+        codebuild/scripts/install-terraform.sh "$TERRAFORM_VERSION"
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        : "${CODEBUILD_SRC_DIR_DestroyPlanArtifact:?DestroyPlanArtifact must be configured as a secondary input artifact}"
+        EXPECTED_ENVIRONMENT="$TARGET_ENVIRONMENT"
+        METADATA_FILE="$CODEBUILD_SRC_DIR_DestroyPlanArtifact/destroy-metadata.env"
+        test -f "$METADATA_FILE"
+        test -f "$CODEBUILD_SRC_DIR_DestroyPlanArtifact/destroy.tfplan"
+        # shellcheck disable=SC1090
+        source "$METADATA_FILE"
+
+        if [ "$DESTROY_TARGET_ENVIRONMENT" != "$EXPECTED_ENVIRONMENT" ]; then
+          echo "Destroy plan environment mismatch: plan=$DESTROY_TARGET_ENVIRONMENT requested=$EXPECTED_ENVIRONMENT"
+          exit 1
+        fi
+        if [ "$DESTROY_TF_BACKEND_BUCKET" != "$TF_BACKEND_BUCKET" ] || [ "$DESTROY_AWS_REGION" != "$AWS_REGION" ]; then
+          echo "Destroy plan backend or region does not match the apply project."
+          exit 1
+        fi
+        if [ "$DESTROY_SOURCE_SHA" != "${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}" ]; then
+          echo "Destroy plan source revision does not match the apply source revision."
+          exit 1
+        fi
+
+        export TARGET_ENVIRONMENT="$EXPECTED_ENVIRONMENT"
+        export REQUESTED_BY="$DESTROY_REQUESTED_BY"
+        export TF_WORKING_DIR="terraform/envs/${TARGET_ENVIRONMENT}"
+        export TF_STATE_KEY="${TARGET_ENVIRONMENT}/terraform.tfstate"
+        test -d "$TF_WORKING_DIR"
+        cp "$CODEBUILD_SRC_DIR_DestroyPlanArtifact/destroy.tfplan" "$TF_WORKING_DIR/destroy.tfplan"
+        cp "$CODEBUILD_SRC_DIR_DestroyPlanArtifact/destroy-resources.txt" "$TF_WORKING_DIR/destroy-resources.txt"
+        if [ -f "$CODEBUILD_SRC_DIR_DestroyPlanArtifact/.terraform.lock.hcl" ]; then
+          cp "$CODEBUILD_SRC_DIR_DestroyPlanArtifact/.terraform.lock.hcl" "$TF_WORKING_DIR/.terraform.lock.hcl"
+        fi
+        echo "Applying the reviewed destruction list:"
+        cat "$TF_WORKING_DIR/destroy-resources.txt"
+
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        terraform -chdir="$TF_WORKING_DIR" init \
+          -input=false \
+          -reconfigure \
+          -backend-config="bucket=$TF_BACKEND_BUCKET" \
+          -backend-config="key=$TF_STATE_KEY" \
+          -backend-config="region=$AWS_REGION" \
+          -backend-config="encrypt=true" \
+          -backend-config="use_lockfile=true"
+
+        terraform -chdir="$TF_WORKING_DIR" apply \
+          -input=false \
+          -lock-timeout=5m \
+          -no-color \
+          destroy.tfplan
+
+  post_build:
+    commands:
+      - |
+        mkdir -p artifacts/destroy-output
+        cat > artifacts/destroy-output/destroy-summary.md <<EOF_SUMMARY
+        # CODAP Terraform Destroy Completed
+
+        - Environment: $TARGET_ENVIRONMENT
+        - Requested by: ${REQUESTED_BY:-unknown}
+        - State key: $TF_STATE_KEY
+        - Result: completed successfully
+        EOF_SUMMARY
+
+artifacts:
+  base-directory: artifacts/destroy-output
+  files:
+    - destroy-summary.md

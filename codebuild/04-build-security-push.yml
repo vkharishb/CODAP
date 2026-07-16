@@ -1,0 +1,229 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    DEMO_REPO: codap-demo-app
+    DORA_REPO: codap-dora-metrics-service
+    SONAR_SCANNER_IMAGE: sonarsource/sonar-scanner-cli:latest
+    OWASP_DEPENDENCY_CHECK_IMAGE: owasp/dependency-check:latest
+    TRIVY_IMAGE: aquasec/trivy:latest
+  parameter-store:
+    SONAR_HOST_URL: "/codap/ci/sonar-host-url"
+    SONAR_ORGANIZATION: "/codap/ci/sonar-organization"
+    SONAR_PROJECT_KEY: "/codap/ci/sonar-project-key"
+  secrets-manager:
+    SONAR_TOKEN: "codap/ci-security:SONAR_TOKEN"
+    NVD_API_KEY: "codap/ci-security:NVD_API_KEY"
+  exported-variables:
+    - IMAGE_TAG
+    - SOURCE_SHA
+    - DEMO_IMAGE
+    - DORA_IMAGE
+
+phases:
+  install:
+    on-failure: ABORT
+    runtime-versions:
+      nodejs: 20
+      python: 3.11
+    commands:
+      - |
+        set -euo pipefail
+        uname -a
+        cat /etc/os-release
+        aws --version
+        docker --version
+        python --version
+        node --version
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        SOURCE_SHA="${CODEBUILD_RESOLVED_SOURCE_VERSION:?Source revision is unavailable}"
+        SHORT_SHA="${SOURCE_SHA:0:12}"
+        IMAGE_TAG="run-${CODEBUILD_BUILD_NUMBER}-${SHORT_SHA}"
+        ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+        ECR_REGISTRY="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+        DEMO_IMAGE="$ECR_REGISTRY/$DEMO_REPO:$IMAGE_TAG"
+        DORA_IMAGE="$ECR_REGISTRY/$DORA_REPO:$IMAGE_TAG"
+        export SOURCE_SHA IMAGE_TAG ACCOUNT_ID ECR_REGISTRY DEMO_IMAGE DORA_IMAGE
+
+        echo "Source SHA: $SOURCE_SHA"
+        echo "Image tag: $IMAGE_TAG"
+        echo "Demo image: $DEMO_IMAGE"
+        echo "DORA image: $DORA_IMAGE"
+
+        aws ecr describe-repositories --repository-names "$DEMO_REPO" "$DORA_REPO" >/dev/null
+        aws ecr get-login-password --region "$AWS_REGION" | \
+          docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+        mkdir -p reports/owasp reports/trivy artifacts/image-output
+
+      - |
+        set -euo pipefail
+        cd demo-app
+        npm ci
+        mkdir -p coverage
+        if npm run | grep -qE '^  test'; then
+          npm test -- --coverage || npm test
+        else
+          echo "No npm test script found. Skipping demo-app unit tests."
+        fi
+        PORT=8080 APP_ENV=ci APP_VERSION="$IMAGE_TAG" npm start > /tmp/codap-demo.log 2>&1 &
+        DEMO_PID=$!
+        sleep 5
+        curl -fsS http://127.0.0.1:8080/health
+        curl -fsS http://127.0.0.1:8080/metrics
+        cat /tmp/codap-demo.log
+        kill "$DEMO_PID" 2>/dev/null || true
+        cd "$CODEBUILD_SRC_DIR"
+
+      - |
+        set -euo pipefail
+        cd dora-metrics-service
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+        if [ -d tests ]; then
+          PYTHONPATH=. pytest --cov=app --cov-report=xml --cov-report=term-missing
+        else
+          echo "No Python tests folder found."
+          mkdir -p coverage
+        fi
+        PYTHONPATH=. CODAP_ENVIRONMENT=ci \
+          uvicorn app.main:app --host 127.0.0.1 --port 9000 > /tmp/codap-dora.log 2>&1 &
+        DORA_PID=$!
+        sleep 5
+        curl -fsS http://127.0.0.1:9000/health
+        curl -fsS http://127.0.0.1:9000/api/v1/dora/summary
+        curl -fsS http://127.0.0.1:9000/metrics
+        cat /tmp/codap-dora.log
+        kill "$DORA_PID" 2>/dev/null || true
+        cd "$CODEBUILD_SRC_DIR"
+
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        cat > sonar-project.properties <<EOF_SONAR
+        sonar.projectKey=$SONAR_PROJECT_KEY
+        sonar.projectName=CODAP
+        sonar.sources=demo-app,dora-metrics-service,gitops,terraform,observability
+        sonar.exclusions=**/node_modules/**,**/.venv/**,**/coverage/**,**/.terraform/**,reports/**
+        sonar.javascript.lcov.reportPaths=demo-app/coverage/lcov.info
+        sonar.python.coverage.reportPaths=dora-metrics-service/coverage.xml
+        sonar.organization=$SONAR_ORGANIZATION
+        EOF_SONAR
+
+        docker run --rm \
+          --user 0:0 \
+          -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+          -e SONAR_TOKEN="$SONAR_TOKEN" \
+          -v "$PWD:/usr/src" \
+          -w /usr/src \
+          "$SONAR_SCANNER_IMAGE"
+
+      - |
+        set -euo pipefail
+        NVD_ARGS=()
+        if [ -n "${NVD_API_KEY:-}" ]; then
+          NVD_ARGS+=(--nvdApiKey "$NVD_API_KEY" --nvdApiDelay 3500)
+        else
+          NVD_ARGS+=(--nvdApiDelay 8000)
+        fi
+
+        docker run --rm \
+          --user 0:0 \
+          -v "$PWD:/src" \
+          "$OWASP_DEPENDENCY_CHECK_IMAGE" \
+          --project CODAP \
+          --scan /src/demo-app \
+          --scan /src/dora-metrics-service \
+          --scan /src/gitops \
+          --scan /src/terraform \
+          --scan /src/observability \
+          --out /src/reports/owasp \
+          --format HTML \
+          --format JSON \
+          --disableAssembly \
+          "${NVD_ARGS[@]}" || true
+
+      - |
+        set -euo pipefail
+        docker run --rm \
+          -v "$PWD:/workspace" \
+          -w /workspace \
+          "$TRIVY_IMAGE" fs \
+          --format table \
+          --output reports/trivy/trivy-fs-iac-report.txt \
+          --severity HIGH,CRITICAL \
+          --ignore-unfixed \
+          --exit-code 0 \
+          .
+
+      - docker build --file demo-app/Dockerfile --tag "$DEMO_IMAGE" demo-app
+      - docker build --file dora-metrics-service/Dockerfile --tag "$DORA_IMAGE" dora-metrics-service
+
+      - |
+        set -euo pipefail
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v "$PWD:/workspace" \
+          -w /workspace \
+          "$TRIVY_IMAGE" image \
+          --format table \
+          --output reports/trivy/trivy-demo-image-report.txt \
+          --severity HIGH,CRITICAL \
+          --ignore-unfixed \
+          --exit-code 0 \
+          "$DEMO_IMAGE"
+
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v "$PWD:/workspace" \
+          -w /workspace \
+          "$TRIVY_IMAGE" image \
+          --format table \
+          --output reports/trivy/trivy-dora-image-report.txt \
+          --severity HIGH,CRITICAL \
+          --ignore-unfixed \
+          --exit-code 0 \
+          "$DORA_IMAGE"
+
+      - docker push "$DEMO_IMAGE"
+      - docker push "$DORA_IMAGE"
+
+  post_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        cp -R reports artifacts/image-output/reports
+        [ ! -d demo-app/coverage ] || cp -R demo-app/coverage artifacts/image-output/demo-coverage
+        [ ! -f dora-metrics-service/coverage.xml ] || cp dora-metrics-service/coverage.xml artifacts/image-output/dora-coverage.xml
+
+        cat > artifacts/image-output/image-metadata.env <<EOF_META
+        IMAGE_TAG=$IMAGE_TAG
+        SOURCE_SHA=$SOURCE_SHA
+        DEMO_REPO=$DEMO_REPO
+        DORA_REPO=$DORA_REPO
+        DEMO_IMAGE=$DEMO_IMAGE
+        DORA_IMAGE=$DORA_IMAGE
+        AWS_REGION=$AWS_REGION
+        CODEBUILD_BUILD_ID=$CODEBUILD_BUILD_ID
+        EOF_META
+        cat artifacts/image-output/image-metadata.env
+
+artifacts:
+  base-directory: artifacts/image-output
+  files:
+    - '**/*'
+
+cache:
+  paths:
+    - '/root/.npm/**/*'
+    - '/root/.cache/pip/**/*'

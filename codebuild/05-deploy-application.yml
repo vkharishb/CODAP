@@ -1,0 +1,226 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    HELM_VERSION: "v4.2.2"
+    AWS_LBC_CHART_VERSION: "3.4.2"
+    KUBE_PROMETHEUS_STACK_VERSION: "87.15.1"
+  parameter-store:
+    EKS_CLUSTER_NAME: "/codap/dev/eks-cluster-name"
+
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        chmod +x codebuild/scripts/*.sh
+        codebuild/scripts/install-helm.sh "$HELM_VERSION"
+        codebuild/scripts/install-kubectl-for-eks.sh
+        aws --version
+        jq --version
+
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        : "${CODEBUILD_SRC_DIR_ImageArtifact:?ImageArtifact must be configured as a secondary input artifact}"
+        METADATA_FILE="$CODEBUILD_SRC_DIR_ImageArtifact/image-metadata.env"
+        test -f "$METADATA_FILE"
+        # shellcheck disable=SC1090
+        source "$METADATA_FILE"
+        export SOURCE_SHA IMAGE_TAG DEMO_REPO DORA_REPO DEMO_IMAGE DORA_IMAGE
+
+        ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+        DORA_REPOSITORY="${DORA_IMAGE%:*}"
+        export ACCOUNT_ID DORA_REPOSITORY
+
+        echo "Deploying source: $SOURCE_SHA"
+        echo "Deploying image tag: $IMAGE_TAG"
+        echo "Demo image: $DEMO_IMAGE"
+        echo "DORA image: $DORA_IMAGE"
+
+        aws eks update-kubeconfig \
+          --region "$AWS_REGION" \
+          --name "$EKS_CLUSTER_NAME"
+        kubectl get nodes -o wide
+        kubectl get namespaces
+
+        helm repo add prometheus-community \
+          https://prometheus-community.github.io/helm-charts \
+          --force-update
+        helm repo add eks https://aws.github.io/eks-charts --force-update
+        helm repo update
+
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create namespace demo --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create namespace dora-metrics --dry-run=client -o yaml | kubectl apply -f -
+
+      - |
+        set -euo pipefail
+        ROLE_NAME="${EKS_CLUSTER_NAME}-aws-load-balancer-controller"
+        ROLE_ARN="$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)"
+        VPC_ID="$(aws eks describe-cluster \
+          --region "$AWS_REGION" \
+          --name "$EKS_CLUSTER_NAME" \
+          --query 'cluster.resourcesVpcConfig.vpcId' \
+          --output text)"
+
+        kubectl -n kube-system create serviceaccount aws-load-balancer-controller \
+          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n kube-system annotate serviceaccount aws-load-balancer-controller \
+          eks.amazonaws.com/role-arn="$ROLE_ARN" \
+          --overwrite
+
+        helm show crds eks/aws-load-balancer-controller \
+          --version "$AWS_LBC_CHART_VERSION" | kubectl apply -f -
+
+        helm upgrade --install aws-load-balancer-controller \
+          eks/aws-load-balancer-controller \
+          --namespace kube-system \
+          --version "$AWS_LBC_CHART_VERSION" \
+          --set clusterName="$EKS_CLUSTER_NAME" \
+          --set region="$AWS_REGION" \
+          --set vpcId="$VPC_ID" \
+          --set serviceAccount.create=false \
+          --set serviceAccount.name=aws-load-balancer-controller \
+          --set replicaCount=2 \
+          --history-max 5 \
+          --wait \
+          --timeout 10m
+
+        kubectl -n kube-system rollout status \
+          deployment/aws-load-balancer-controller \
+          --timeout=5m
+
+      - |
+        set -euo pipefail
+        kubectl get storageclass gp3 -o wide
+        kubectl -n kube-system rollout status deployment/ebs-csi-controller --timeout=5m
+        kubectl -n kube-system get pods \
+          -l app.kubernetes.io/name=aws-ebs-csi-driver \
+          -o wide
+
+      - |
+        set -euo pipefail
+        if helm -n monitoring status observability >/dev/null 2>&1; then
+          RELEASE_STATUS="$(helm -n monitoring status observability -o json | jq -r '.info.status')"
+          echo "Existing observability release status: $RELEASE_STATUS"
+          case "$RELEASE_STATUS" in
+            failed|pending-install|pending-upgrade|pending-rollback|uninstalling)
+              helm -n monitoring uninstall observability --wait --timeout 5m
+              ;;
+            *)
+              echo "Release is healthy enough for an in-place upgrade."
+              ;;
+          esac
+        else
+          echo "No existing observability release."
+        fi
+
+      - kubectl apply -f gitops/manifests/observability-dashboards
+
+      - |
+        set -euo pipefail
+        helm upgrade --install observability \
+          prometheus-community/kube-prometheus-stack \
+          --namespace monitoring \
+          --version "$KUBE_PROMETHEUS_STACK_VERSION" \
+          --values observability/values-dev.yaml \
+          --history-max 5 \
+          --wait \
+          --timeout 20m
+        kubectl -n monitoring rollout status \
+          deployment/observability-grafana \
+          --timeout=5m
+
+      - |
+        set -euo pipefail
+        kubectl apply -f gitops/manifests/networking/grafana-ingress.yaml
+        kubectl -n monitoring get ingress grafana-public
+        kubectl -n monitoring describe ingress grafana-public
+
+      - |
+        set -euo pipefail
+        helm upgrade --install dora-metrics-service \
+          dora-metrics-service/chart \
+          --namespace dora-metrics \
+          --set image.repository="$DORA_REPOSITORY" \
+          --set image.tag="$IMAGE_TAG" \
+          --history-max 5 \
+          --wait \
+          --timeout 10m
+        kubectl -n dora-metrics rollout status \
+          deployment/dora-metrics-service \
+          --timeout=5m
+
+      - |
+        set -euo pipefail
+        kubectl apply -f gitops/manifests/demo/namespace-rbac.yaml
+
+        WORK_DIR="$(mktemp -d)"
+        RENDERED_MANIFEST="$WORK_DIR/demo-api.yaml"
+        cp gitops/manifests/demo/demo-api.yaml "$RENDERED_MANIFEST"
+        sed -i -E \
+          "s|^([[:space:]]*)image:[[:space:]]+codap-demo-api:[^[:space:]]+|\\1image: $DEMO_IMAGE|" \
+          "$RENDERED_MANIFEST"
+
+        if ! grep -Fq "image: $DEMO_IMAGE" "$RENDERED_MANIFEST"; then
+          echo "Failed to render DEMO_IMAGE into $RENDERED_MANIFEST"
+          exit 1
+        fi
+
+        DESIRED_SELECTOR='{"app":"demo-api"}'
+        if kubectl -n demo get deployment demo-api >/dev/null 2>&1; then
+          CURRENT_SELECTOR="$(kubectl -n demo get deployment demo-api -o json | jq -cS '.spec.selector.matchLabels')"
+          if [ "$CURRENT_SELECTOR" != "$DESIRED_SELECTOR" ]; then
+            kubectl -n demo delete deployment demo-api --wait=true --timeout=3m
+          fi
+        fi
+
+        kubectl apply -f "$RENDERED_MANIFEST"
+        kubectl -n demo rollout status deployment/demo-api --timeout=5m
+        rm -rf "$WORK_DIR"
+
+      - |
+        set -euo pipefail
+        kubectl -n monitoring get pods,svc,pvc
+        kubectl -n demo get pods,svc,hpa
+        kubectl -n dora-metrics get pods,svc
+
+    finally:
+      - |
+        mkdir -p artifacts/deployment-diagnostics
+        if [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" -ne 1 ] && [ -x scripts/collect-k8s-diagnostics.sh ]; then
+          bash scripts/collect-k8s-diagnostics.sh artifacts/deployment-diagnostics || true
+        fi
+
+  post_build:
+    commands:
+      - |
+        mkdir -p artifacts/deployment-output
+        cat > artifacts/deployment-output/deployment-summary.md <<EOF_SUMMARY
+        # CODAP Deployment
+
+        - Source SHA: $SOURCE_SHA
+        - Image tag: $IMAGE_TAG
+        - EKS cluster: $EKS_CLUSTER_NAME
+        - kube-prometheus-stack: $KUBE_PROMETHEUS_STACK_VERSION
+        - AWS Load Balancer Controller chart: $AWS_LBC_CHART_VERSION
+        - Result: successful
+        EOF_SUMMARY
+        if [ -d artifacts/deployment-diagnostics ]; then
+          cp -R artifacts/deployment-diagnostics artifacts/deployment-output/ || true
+        fi
+
+artifacts:
+  base-directory: artifacts/deployment-output
+  files:
+    - '**/*'

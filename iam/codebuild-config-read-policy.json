@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadCODAPCISecuritySecret",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:ap-south-2:230477418786:secret:codap/ci-security-*"
+    },
+    {
+      "Sid": "ReadCODAPParameters",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameters",
+      "Resource": "arn:aws:ssm:ap-south-2:230477418786:parameter/codap/*"
+    },
+    {
+      "Sid": "DecryptConfigurationValues",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": [
+            "secretsmanager.ap-south-2.amazonaws.com",
+            "ssm.ap-south-2.amazonaws.com"
+          ]
+        }
+      }
+    }
+  ]
+}
