@@ -1,0 +1,69 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: ap-south-2
+    ECR_REPOSITORY: codap
+
+  # Example:
+  # secrets-manager:
+  #   SONAR_TOKEN: "codap/ci:SONAR_TOKEN"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+
+    commands:
+      - echo "Installing dependencies"
+      - node --version
+      - npm --version
+      - npm ci
+
+  pre_build:
+    commands:
+      - echo "Running pre-build checks"
+
+      # Unit tests
+      - npm test
+
+      # Optional security tools
+      # - npm audit --audit-level=high
+      # - trivy fs --exit-code 1 --severity HIGH,CRITICAL .
+
+      - echo "Logging in to Amazon ECR"
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+      - aws ecr get-login-password --region $AWS_REGION |
+        docker login --username AWS --password-stdin $ECR_URI
+
+      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-12)
+      - IMAGE_URI=$ECR_URI/$ECR_REPOSITORY:$IMAGE_TAG
+
+  build:
+    commands:
+      - echo "Building CODAP application"
+      - npm run build
+
+      - echo "Building Docker image"
+      - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+      - docker tag $ECR_REPOSITORY:$IMAGE_TAG $IMAGE_URI
+
+  post_build:
+    commands:
+      - echo "Pushing Docker image"
+      - docker push $IMAGE_URI
+
+      - echo "Creating image definition"
+      - printf '[{"name":"codap","imageUri":"%s"}]' $IMAGE_URI > imagedefinitions.json
+
+      - echo "Build completed successfully"
+      - echo "Image: $IMAGE_URI"
+
+artifacts:
+  files:
+    - imagedefinitions.json
+
+cache:
+  paths:
+    - node_modules/**/*
