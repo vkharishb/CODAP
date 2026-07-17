@@ -25,6 +25,11 @@ npm-debug.log
 # Generated proof output
 proofs/generated/
 *.zip
-/docs
-/proofs
+docs/
+proofs/
+codebuild/
+codepipeline/
+config/
+iam/
+setup/
 
