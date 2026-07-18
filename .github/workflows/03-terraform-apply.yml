@@ -13,13 +13,17 @@ permissions:
   contents: read
   actions: write
 
+concurrency:
+  group: codap-terraform-dev
+  cancel-in-progress: false
+
 env:
+  APP_NAME: codap
   AWS_REGION: ${{ secrets.AWS_REGION }}
   TF_WORKING_DIR: terraform/envs/dev
   TF_STATE_KEY: dev/terraform.tfstate
   TF_BACKEND_BUCKET: ${{ secrets.TF_BACKEND_BUCKET }}
-  APP_NAME: codap
-  TARGET_ENVIRONMENT: "${{ inputs.target_environment }} || dev"
+  TARGET_ENVIRONMENT: dev
 
 jobs:
   terraform-apply:
@@ -32,63 +36,143 @@ jobs:
       - name: Step 03.01 - Checkout source code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
       - name: Step 03.02 - Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
           role-session-name: codap-terraform-apply
           mask-aws-account-id: true
 
-      - name: Step 03.03 - Mask AWS account ID
+      - name: Step 03.03 - Verify AWS identity
+        shell: bash
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           echo "::add-mask::$ACCOUNT_ID"
+          echo "AWS_ACCOUNT_ID=$ACCOUNT_ID" >> "$GITHUB_ENV"
+          aws sts get-caller-identity --query Arn --output text
 
       - name: Step 03.04 - Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.10.5"
 
-      - name: Step 03.05 - Prepare backend bucket variable
+      - name: Step 03.05 - Resolve and verify S3 backend
+        shell: bash
         run: |
-          BACKEND_BUCKET="${TF_BACKEND_BUCKET}"
-          if [ -z "$BACKEND_BUCKET" ]; then
-            BACKEND_BUCKET="${APP_NAME}-tfstate-${TARGET_ENVIRONMENT}"
+          set -euo pipefail
+
+          if [[ -z "${AWS_REGION:-}" ]]; then
+            echo "::error::AWS_REGION is empty. Configure the AWS_REGION repository secret."
+            exit 1
           fi
-          echo "::add-mask::$BACKEND_BUCKET"
+
+          BACKEND_BUCKET="${TF_BACKEND_BUCKET:-}"
+          if [[ -z "$BACKEND_BUCKET" ]]; then
+            BACKEND_BUCKET="${APP_NAME}-tfstate-${TARGET_ENVIRONMENT}-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+          fi
+
+          if [[ "$BACKEND_BUCKET" == s3://* || "$BACKEND_BUCKET" == arn:aws:s3:::* || "$BACKEND_BUCKET" == */* ]]; then
+            echo "::error::TF_BACKEND_BUCKET must contain only an S3 bucket name."
+            exit 1
+          fi
+
           echo "TF_BACKEND_BUCKET=$BACKEND_BUCKET" >> "$GITHUB_ENV"
 
+          if ! aws s3api head-bucket \
+            --bucket "$BACKEND_BUCKET" \
+            --region "$AWS_REGION"; then
+            echo "::error::Terraform backend bucket is missing or inaccessible. Run 02 - Terraform Plan first."
+            exit 1
+          fi
+
+          BUCKET_REGION="$(aws s3api get-bucket-location \
+            --bucket "$BACKEND_BUCKET" \
+            --query LocationConstraint \
+            --output text)"
+
+          if [[ "$BUCKET_REGION" == "None" || "$BUCKET_REGION" == "null" ]]; then
+            BUCKET_REGION="us-east-1"
+          elif [[ "$BUCKET_REGION" == "EU" ]]; then
+            BUCKET_REGION="eu-west-1"
+          fi
+
+          if [[ "$BUCKET_REGION" != "$AWS_REGION" ]]; then
+            echo "::error::Backend bucket region is $BUCKET_REGION, but AWS_REGION is $AWS_REGION."
+            exit 1
+          fi
+
       - name: Step 03.06 - Terraform init with S3 lockfile
+        shell: bash
         run: |
-          terraform -chdir=${{ env.TF_WORKING_DIR }} init -reconfigure \
-            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
-            -backend-config="key=${{ env.TF_STATE_KEY }}" \
-            -backend-config="region=${{ secrets.AWS_REGION }}" \
+          set -euo pipefail
+          terraform -chdir="$TF_WORKING_DIR" init -input=false -reconfigure \
+            -backend-config="bucket=$TF_BACKEND_BUCKET" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=$AWS_REGION" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
       - name: Step 03.07 - Terraform validate
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} validate
+        shell: bash
+        run: terraform -chdir="$TF_WORKING_DIR" validate
 
-      - name: Step 03.08 - Terraform apply
-        run: terraform -chdir=${{ env.TF_WORKING_DIR }} apply -auto-approve
+      - name: Step 03.08 - Download approved Terraform plan
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v5
+        with:
+          name: codap-tfplan
+          path: ${{ env.TF_WORKING_DIR }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Step 03.09 - Terraform output summary
+      - name: Step 03.09 - Create plan for manual apply
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
         run: |
-          terraform -chdir=${{ env.TF_WORKING_DIR }} output || true
+          set -euo pipefail
+          terraform -chdir="$TF_WORKING_DIR" plan \
+            -input=false \
+            -out=tfplan
+
+      - name: Step 03.10 - Verify Terraform plan file
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$TF_WORKING_DIR/tfplan" || {
+            echo "::error::Terraform plan file was not found or is empty."
+            exit 1
+          }
+
+      - name: Step 03.11 - Terraform apply approved plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform -chdir="$TF_WORKING_DIR" apply \
+            -input=false \
+            -auto-approve \
+            tfplan
+
+      - name: Step 03.12 - Terraform output summary
+        shell: bash
+        run: |
+          terraform -chdir="$TF_WORKING_DIR" output || true
           {
             echo "## Terraform Apply Completed"
             echo ""
-            echo "- EKS infrastructure apply completed"
+            echo "- Environment: $TARGET_ENVIRONMENT"
+            echo "- State key: $TF_STATE_KEY"
+            echo "- Applied plan: tfplan"
             echo "- Next workflow: 04 - Build Security Push"
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Step 03.10 - Trigger Build Security Push workflow
+
+      - name: Step 03.13 - Trigger Build Security Push workflow
         if: ${{ success() }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -96,14 +180,18 @@ jobs:
               context.payload.workflow_run?.head_branch ||
               context.ref.replace('refs/heads/', '');
 
+            const sourceSha =
+              context.payload.workflow_run?.head_sha ||
+              context.sha;
+
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: '04-build-security-push.yml',
               ref,
               inputs: {
-                source_sha: context.payload.workflow_run?.head_sha || context.sha
+                source_sha: sourceSha
               }
             });
 
-            core.info(`Triggered 04 - Build Security Push on ref: ${ref}`);
+            core.info(`Triggered 04 - Build Security Push on ${ref} at ${sourceSha}`);
