@@ -24,7 +24,7 @@ env:
 jobs:
   terraform-apply:
     name: Step 03 - Terraform Apply
-    runs-on: ubuntu-latestclear
+    runs-on: ubuntu-latest
     environment: dev
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
